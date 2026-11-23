@@ -46,9 +46,9 @@ const IndoorNavLogoMark: React.FC<{ size?: 'sm' | 'md' }> = ({ size = 'sm' }) =>
   const iconDim = size === 'md' ? 'w-6 h-6' : 'w-5 h-5';
   return (
     <div
-      className={`${dim} rounded-xl bg-gradient-to-tr from-cyan-500 to-blue-600 p-[1.5px] shadow-lg shadow-cyan-500/20 shrink-0`}
+      className={`${dim} rounded-xl bg-gradient-to-tr from-cyan-400 to-blue-500 p-[1.5px] shadow-md shadow-cyan-500/15 shrink-0`}
     >
-      <div className="w-full h-full bg-[#0F172A] rounded-[10.5px] flex items-center justify-center">
+      <div className="w-full h-full bg-[#111622] rounded-[10.5px] flex items-center justify-center">
         <Compass className={`${iconDim} text-cyan-400`} aria-hidden="true" />
       </div>
     </div>
@@ -348,7 +348,6 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
 
     try {
       await authService.signInWithOAuth(provider);
-      // Browser navigates away on OAuth start; keep spinner if redirect in flight
     } catch (err) {
       if (err instanceof AuthServiceError) {
         setFormError(err.message);
@@ -459,68 +458,99 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
   const showOAuthSection = hasGoogle || hasGitHub;
 
   return (
-    <div className="min-h-screen w-full bg-[#070B14] text-slate-100 flex items-center justify-center px-4 py-8 sm:px-6 lg:px-10 relative overflow-x-hidden">
-      {/* Ambient Brand Glows */}
+    <div className="min-h-screen w-full bg-[#0B0F17] text-slate-100 flex items-center justify-center px-4 py-8 sm:px-6 lg:px-10 relative overflow-x-hidden">
+      {/* Subtle Architectural Backdrop */}
       <div
         aria-hidden="true"
-        className="pointer-events-none fixed -top-36 -left-36 w-[28rem] h-[28rem] rounded-full bg-cyan-500/10 blur-3xl"
+        className="pointer-events-none fixed inset-0 opacity-[0.1]"
+        style={{
+          backgroundImage:
+            'radial-gradient(circle at 1px 1px, rgba(148, 163, 184, 0.35) 1px, transparent 0)',
+          backgroundSize: '28px 28px',
+        }}
       />
       <div
         aria-hidden="true"
-        className="pointer-events-none fixed -bottom-36 -right-36 w-[28rem] h-[28rem] rounded-full bg-blue-600/10 blur-3xl"
+        className="pointer-events-none fixed -top-40 -left-40 w-[30rem] h-[30rem] rounded-full bg-cyan-500/8 blur-3xl"
+      />
+      <div
+        aria-hidden="true"
+        className="pointer-events-none fixed -bottom-40 -right-40 w-[30rem] h-[30rem] rounded-full bg-blue-600/8 blur-3xl"
       />
 
-      <div className="relative z-10 w-full max-w-5xl grid grid-cols-1 lg:grid-cols-2 gap-8 lg:gap-12 items-center">
-        {/* Desktop Left Brand Panel */}
-        <div className="hidden lg:flex flex-col justify-between p-10 rounded-3xl bg-[#0F172A]/75 border border-slate-800/80 backdrop-blur-xl min-h-[560px] shadow-2xl">
+      <div className="relative z-10 w-full max-w-5xl grid grid-cols-1 lg:grid-cols-12 gap-8 lg:gap-10 items-stretch">
+        {/* Desktop Left Brand Showcase */}
+        <div className="hidden lg:flex lg:col-span-6 flex-col justify-between p-9 rounded-2xl bg-[#111622] border border-slate-800/90 shadow-2xl">
           <div>
-            <div className="flex items-center gap-3.5">
+            <div className="flex items-center gap-3">
               <IndoorNavLogoMark size="md" />
-              <span className="text-xl font-bold tracking-tight text-white">
+              <span className="text-lg font-bold tracking-tight text-white">
                 Indoor Navigation
               </span>
             </div>
 
-            <div className="mt-12">
+            <div className="mt-10">
               <h2 className="text-3xl font-bold tracking-tight text-white leading-tight [text-wrap:balance]">
-                Welcome to Indoor Navigation
+                Spatial wayfinding for modern interiors.
               </h2>
-              <p className="mt-3 text-base text-slate-300 leading-relaxed max-w-md">
-                Real-time indoor positioning, live peer discovery, and A* wayfinding across your floor plan.
+              <p className="mt-3.5 text-[15px] text-slate-400 leading-relaxed max-w-md">
+                Track live walking motion with inertial step detection, resolve shortest paths around architectural walls, and locate colleagues across your floor plan.
               </p>
             </div>
           </div>
 
-          {/* Animated Indoor Floor Plan & Wayfinding Visual */}
-          <div className="my-8 p-6 rounded-2xl bg-[#090D18]/90 border border-slate-800/80">
+          {/* Architectural Blueprint Floor Plan Preview */}
+          <div className="my-8 p-5 rounded-xl bg-[#0D121D] border border-slate-800/80">
             <svg
-              viewBox="0 0 320 120"
-              className="w-full h-28"
+              viewBox="0 0 340 132"
+              className="w-full h-32"
               fill="none"
               xmlns="http://www.w3.org/2000/svg"
               aria-hidden="true"
             >
-              {/* Subtle Floor Grid */}
+              {/* Coordinate Grid */}
               <path
-                d="M20 30 H300 M20 60 H300 M20 90 H300 M80 12 V108 M160 12 V108 M240 12 V108"
+                d="M20 33 H320 M20 66 H320 M20 99 H320 M85 12 V120 M170 12 V120 M255 12 V120"
                 stroke="#1E293B"
+                strokeOpacity="0.65"
                 strokeWidth="1"
               />
-              {/* Room Outlines */}
-              <rect x="24" y="16" width="84" height="40" rx="6" fill="#0F172A" stroke="#334155" strokeWidth="1.5" />
-              <rect x="212" y="64" width="84" height="40" rx="6" fill="#0F172A" stroke="#334155" strokeWidth="1.5" />
+              {/* Room Blocks with Doorways */}
+              <rect
+                x="24"
+                y="16"
+                width="92"
+                height="46"
+                rx="4"
+                fill="#131E34"
+                stroke="#334155"
+                strokeWidth="1.5"
+              />
+              <rect
+                x="224"
+                y="70"
+                width="92"
+                height="46"
+                rx="4"
+                fill="#131E34"
+                stroke="#334155"
+                strokeWidth="1.5"
+              />
+              {/* Door Threshold Markers */}
+              <line x1="116" y1="30" x2="116" y2="48" stroke="#22D3EE" strokeWidth="2" strokeDasharray="3 3" />
+              <line x1="224" y1="84" x2="224" y2="102" stroke="#22D3EE" strokeWidth="2" strokeDasharray="3 3" />
 
               {/* Glowing A* Route Path */}
               <path
-                d="M66 36 L160 36 L160 84 L254 84"
+                d="M70 39 L170 39 L170 93 L270 93"
                 stroke="#06B6D4"
-                strokeOpacity="0.22"
+                strokeOpacity="0.2"
                 strokeWidth="8"
                 strokeLinecap="round"
                 strokeLinejoin="round"
               />
               <motion.path
-                d="M66 36 L160 36 L160 84 L254 84"
+                d="M70 39 L170 39 L170 93 L270 93"
                 stroke="#22D3EE"
                 strokeWidth="2.5"
                 strokeLinecap="round"
@@ -534,659 +564,677 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
                 }
               />
 
-              {/* User Beacon (Blue) */}
+              {/* User Beacon */}
               {!prefersReducedMotion && (
                 <motion.circle
-                  cx="66"
-                  cy="36"
+                  cx="70"
+                  cy="39"
                   r="10"
-                  stroke="#3B82F6"
+                  stroke="#38BDF8"
                   strokeWidth="2"
-                  animate={{ scale: [0.8, 1.8], opacity: [0.8, 0] }}
-                  transition={{ duration: 1.8, repeat: Infinity, ease: 'easeOut' }}
-                  style={{ transformOrigin: '66px 36px' }}
+                  animate={{ scale: [0.85, 1.85], opacity: [0.75, 0] }}
+                  transition={{ duration: 1.9, repeat: Infinity, ease: 'easeOut' }}
+                  style={{ transformOrigin: '70px 39px' }}
                 />
               )}
-              <circle cx="66" cy="36" r="6" fill="#3B82F6" stroke="#FFFFFF" strokeWidth="2" />
+              <circle cx="70" cy="39" r="5.5" fill="#3B82F6" stroke="#FFFFFF" strokeWidth="2" />
 
-              {/* Target Peer Beacon (Amber) */}
+              {/* Target Peer Beacon */}
               {!prefersReducedMotion && (
                 <motion.circle
-                  cx="254"
-                  cy="84"
+                  cx="270"
+                  cy="93"
                   r="10"
                   stroke="#F59E0B"
                   strokeWidth="2"
-                  animate={{ scale: [0.8, 1.8], opacity: [0.8, 0] }}
-                  transition={{ duration: 1.8, delay: 0.6, repeat: Infinity, ease: 'easeOut' }}
-                  style={{ transformOrigin: '254px 84px' }}
+                  animate={{ scale: [0.85, 1.85], opacity: [0.75, 0] }}
+                  transition={{ duration: 1.9, delay: 0.65, repeat: Infinity, ease: 'easeOut' }}
+                  style={{ transformOrigin: '270px 93px' }}
                 />
               )}
-              <circle cx="254" cy="84" r="6" fill="#F59E0B" stroke="#FFFFFF" strokeWidth="2" />
+              <circle cx="270" cy="93" r="5.5" fill="#F59E0B" stroke="#FFFFFF" strokeWidth="2" />
             </svg>
-            <p className="mt-3 text-xs text-slate-400">
-              Precision indoor positioning &amp; live wayfinding.
-            </p>
+
+            <div className="mt-3 pt-3 border-t border-slate-800/80 flex items-center justify-between text-xs text-slate-400">
+              <span>Floor 1 · Active Wayfinding</span>
+              <span className="font-mono tabular-nums text-cyan-400">14.2 m</span>
+            </div>
           </div>
 
-          <p className="text-xs text-slate-500">
-            Indoor Navigation · Multi-user floor tracking &amp; shortest-path routing
-          </p>
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-slate-500">
+            <span>PDR Motion Sensing</span>
+            <span aria-hidden="true">·</span>
+            <span>Wall-Aware Physics</span>
+            <span aria-hidden="true">·</span>
+            <span>Live A* Routing</span>
+          </div>
         </div>
 
         {/* Right (or Centered Mobile) Auth Form Card */}
-        <div className="w-full max-w-md mx-auto bg-[#0F172A]/85 border border-slate-800/80 rounded-3xl p-6 sm:p-8 backdrop-blur-xl shadow-2xl">
-          {pendingVerificationEmail ? (
-            /* 6-Digit Email Verification Step (Same Card) */
-            <motion.div
-              key="verify-email-view"
-              initial={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: 8 }}
-              animate={prefersReducedMotion ? { opacity: 1 } : { opacity: 1, y: 0 }}
-              transition={{ duration: 0.22 }}
-            >
-              <button
-                type="button"
-                onClick={() => {
-                  setPendingVerificationEmail(null);
-                  setVerificationCode('');
-                  setVerificationError(null);
-                  setVerificationNotice(null);
-                }}
-                className="inline-flex items-center gap-1.5 min-h-[44px] text-xs font-medium text-slate-400 hover:text-white transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 rounded-lg mb-3"
+        <div className="lg:col-span-6 flex items-center justify-center">
+          <div className="w-full max-w-md bg-[#111622] border border-slate-800/90 rounded-2xl p-6 sm:p-8 shadow-2xl">
+            {pendingVerificationEmail ? (
+              /* 6-Digit Email Verification Step (Same Card) */
+              <motion.div
+                key="verify-email-view"
+                initial={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: 8 }}
+                animate={prefersReducedMotion ? { opacity: 1 } : { opacity: 1, y: 0 }}
+                transition={{ duration: 0.2 }}
               >
-                <ArrowLeft className="w-4 h-4" aria-hidden="true" />
-                <span>Back to {mode === 'signup' ? 'Sign Up' : 'Sign In'}</span>
-              </button>
-
-              <div className="flex items-center gap-3 mb-3">
-                <div className="w-10 h-10 rounded-xl bg-cyan-500/15 border border-cyan-500/30 flex items-center justify-center shrink-0">
-                  <KeyRound className="w-5 h-5 text-cyan-400" aria-hidden="true" />
-                </div>
-                <div>
-                  <h1 className="text-xl font-bold text-white tracking-tight">
-                    Verify your email
-                  </h1>
-                  <p className="text-xs text-slate-400 mt-0.5 break-all">
-                    {pendingVerificationEmail}
-                  </p>
-                </div>
-              </div>
-
-              {verificationNotice && (
-                <div
-                  role="status"
-                  aria-live="polite"
-                  className="mb-4 p-3.5 rounded-xl bg-cyan-950/50 border border-cyan-500/30 text-cyan-100 text-xs flex items-start gap-2.5"
-                >
-                  <CheckCircle2 className="w-4 h-4 text-cyan-400 shrink-0 mt-0.5" aria-hidden="true" />
-                  <span>{verificationNotice}</span>
-                </div>
-              )}
-
-              {verificationError && (
-                <div
-                  role="alert"
-                  aria-live="polite"
-                  className="mb-4 p-3.5 rounded-xl bg-rose-950/60 border border-rose-500/40 text-rose-200 text-xs flex items-start gap-2.5"
-                >
-                  <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" aria-hidden="true" />
-                  <span>{verificationError}</span>
-                </div>
-              )}
-
-              <form onSubmit={handleVerifyEmailSubmit} noValidate className="space-y-4">
-                <div>
-                  <label
-                    htmlFor={`${baseId}-verify-code`}
-                    className="block text-xs font-medium text-slate-200 mb-1.5"
-                  >
-                    6-digit verification code
-                  </label>
-                  <input
-                    id={`${baseId}-verify-code`}
-                    type="text"
-                    inputMode="numeric"
-                    autoComplete="one-time-code"
-                    maxLength={6}
-                    value={verificationCode}
-                    onChange={(e) => {
-                      const digits = e.target.value.replace(/\D/g, '').slice(0, 6);
-                      setVerificationCode(digits);
-                      if (verificationError) setVerificationError(null);
-                    }}
-                    placeholder="000000"
-                    className="w-full min-h-[48px] bg-[#090D18] border border-slate-800 focus:border-cyan-500 rounded-xl px-4 py-2.5 text-center text-lg font-mono tracking-[0.4em] text-white placeholder:text-slate-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 transition-colors"
-                  />
-                </div>
-
-                <button
-                  type="submit"
-                  disabled={isVerifying}
-                  className="w-full min-h-[44px] py-3 px-4 rounded-xl text-sm font-bold bg-cyan-500 hover:bg-cyan-400 active:bg-cyan-500 text-slate-950 shadow-lg shadow-cyan-500/20 transition-colors flex items-center justify-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300"
-                >
-                  {isVerifying ? (
-                    <>
-                      <span
-                        className="w-4 h-4 border-2 border-slate-950 border-t-transparent rounded-full animate-spin"
-                        aria-hidden="true"
-                      />
-                      <span>Verifying...</span>
-                    </>
-                  ) : (
-                    <>
-                      <span>Verify &amp; Continue</span>
-                      <ArrowRight className="w-4 h-4" aria-hidden="true" />
-                    </>
-                  )}
-                </button>
-              </form>
-
-              <div className="mt-4 flex items-center justify-between text-xs text-slate-400">
-                <span>Didn&apos;t receive the code?</span>
                 <button
                   type="button"
-                  onClick={handleResendVerification}
-                  disabled={resendCooldown > 0 || isResendingCode}
-                  className="min-h-[44px] px-2 font-semibold text-cyan-400 hover:text-cyan-300 disabled:text-slate-500 disabled:cursor-not-allowed transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 rounded-lg"
+                  onClick={() => {
+                    setPendingVerificationEmail(null);
+                    setVerificationCode('');
+                    setVerificationError(null);
+                    setVerificationNotice(null);
+                  }}
+                  className="inline-flex items-center gap-1.5 min-h-[44px] text-xs font-medium text-slate-400 hover:text-white transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 rounded-lg mb-3"
                 >
-                  {isResendingCode
-                    ? 'Sending...'
-                    : resendCooldown > 0
-                      ? `Resend in ${resendCooldown}s`
-                      : 'Resend code'}
+                  <ArrowLeft className="w-4 h-4" aria-hidden="true" />
+                  <span>Back to {mode === 'signup' ? 'Sign Up' : 'Sign In'}</span>
                 </button>
-              </div>
-            </motion.div>
-          ) : (
-            <>
-              {/* Header (Compact on desktop, full brand anchor on mobile) */}
-              <div className="flex flex-col items-center lg:items-start text-center lg:text-left mb-6">
-                <div className="flex items-center gap-3 mb-3 lg:hidden">
-                  <IndoorNavLogoMark size="sm" />
-                  <span className="text-lg font-bold tracking-tight text-white">
-                    Indoor Navigation
-                  </span>
-                </div>
-                <h1 className="text-2xl font-bold text-white tracking-tight">
-                  Welcome to Indoor Navigation
-                </h1>
-                <p className="text-sm text-slate-400 mt-1">
-                  Sign in to access your live building floor plan.
-                </p>
-              </div>
 
-              {/* Animated Tab Switch: Sign In / Sign Up */}
-              {!authConfig.disableSignup && (
-                <div
-                  role="tablist"
-                  aria-label="Authentication mode"
-                  className="grid grid-cols-2 p-1 rounded-xl bg-slate-900/90 border border-slate-800 mb-6"
-                >
-                  {(['signin', 'signup'] as const).map((tab) => {
-                    const active = mode === tab;
-                    return (
-                      <button
-                        key={tab}
-                        type="button"
-                        role="tab"
-                        aria-selected={active}
-                        onClick={() => switchMode(tab)}
-                        className={`relative min-h-[44px] rounded-lg text-sm font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 ${
-                          active ? 'text-slate-950' : 'text-slate-300 hover:text-white'
-                        }`}
-                      >
-                        {active && (
-                          <motion.span
-                            layoutId="indoor-nav-auth-tab"
-                            transition={
-                              prefersReducedMotion
-                                ? { duration: 0.1 }
-                                : { type: 'spring', stiffness: 420, damping: 32 }
-                            }
-                            className="absolute inset-0 rounded-lg bg-cyan-500 shadow-md shadow-cyan-500/20"
-                          />
-                        )}
-                        <span className="relative z-10">
-                          {tab === 'signin' ? 'Sign In' : 'Sign Up'}
-                        </span>
-                      </button>
-                    );
-                  })}
+                <div className="flex items-center gap-3 mb-4">
+                  <div className="w-10 h-10 rounded-xl bg-cyan-500/10 border border-cyan-500/30 flex items-center justify-center shrink-0">
+                    <KeyRound className="w-5 h-5 text-cyan-400" aria-hidden="true" />
+                  </div>
+                  <div>
+                    <h1 className="text-xl font-bold text-white tracking-tight">
+                      Verify your email
+                    </h1>
+                    <p className="text-xs text-slate-400 mt-0.5 break-all">
+                      {pendingVerificationEmail}
+                    </p>
+                  </div>
                 </div>
-              )}
 
-              {/* OAuth Providers + "or" divider */}
-              {showOAuthSection && (
-                <>
+                {verificationNotice && (
                   <div
-                    className={`grid gap-2.5 ${
-                      hasGoogle && hasGitHub ? 'grid-cols-1 sm:grid-cols-2' : 'grid-cols-1'
-                    }`}
+                    role="status"
+                    aria-live="polite"
+                    className="mb-4 p-3.5 rounded-xl bg-cyan-950/40 border border-cyan-500/30 text-cyan-100 text-xs flex items-start gap-2.5"
                   >
-                    {hasGoogle && (
-                      <button
-                        type="button"
-                        onClick={() => handleOAuthContinue('google')}
-                        disabled={busy}
-                        className="w-full min-h-[44px] px-4 py-2.5 rounded-xl bg-[#090D18] hover:bg-slate-900 border border-slate-700/80 hover:border-slate-600 text-slate-100 text-sm font-medium transition-colors flex items-center justify-center gap-2.5 disabled:opacity-60 disabled:cursor-not-allowed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400"
-                      >
-                        {oauthLoading === 'google' ? (
-                          <span
-                            className="w-4 h-4 border-2 border-cyan-400 border-t-transparent rounded-full animate-spin"
-                            aria-hidden="true"
-                          />
-                        ) : (
-                          <GoogleIcon />
-                        )}
-                        <span>{hasGitHub ? 'Google' : 'Continue with Google'}</span>
-                      </button>
-                    )}
-
-                    {hasGitHub && (
-                      <button
-                        type="button"
-                        onClick={() => handleOAuthContinue('github')}
-                        disabled={busy}
-                        className="w-full min-h-[44px] px-4 py-2.5 rounded-xl bg-[#090D18] hover:bg-slate-900 border border-slate-700/80 hover:border-slate-600 text-slate-100 text-sm font-medium transition-colors flex items-center justify-center gap-2.5 disabled:opacity-60 disabled:cursor-not-allowed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400"
-                      >
-                        {oauthLoading === 'github' ? (
-                          <span
-                            className="w-4 h-4 border-2 border-cyan-400 border-t-transparent rounded-full animate-spin"
-                            aria-hidden="true"
-                          />
-                        ) : (
-                          <GitHubIcon />
-                        )}
-                        <span>{hasGoogle ? 'GitHub' : 'Continue with GitHub'}</span>
-                      </button>
-                    )}
+                    <CheckCircle2
+                      className="w-4 h-4 text-cyan-400 shrink-0 mt-0.5"
+                      aria-hidden="true"
+                    />
+                    <span>{verificationNotice}</span>
                   </div>
+                )}
 
-                  <div className="flex items-center gap-3 my-5" aria-hidden="true">
-                    <div className="h-px flex-1 bg-slate-800" />
-                    <span className="text-xs font-medium text-slate-500">or</span>
-                    <div className="h-px flex-1 bg-slate-800" />
+                {verificationError && (
+                  <div
+                    role="alert"
+                    aria-live="polite"
+                    className="mb-4 p-3.5 rounded-xl bg-rose-950/50 border border-rose-500/40 text-rose-200 text-xs flex items-start gap-2.5"
+                  >
+                    <AlertCircle
+                      className="w-4 h-4 text-rose-400 shrink-0 mt-0.5"
+                      aria-hidden="true"
+                    />
+                    <span>{verificationError}</span>
                   </div>
-                </>
-              )}
+                )}
 
-              {/* Form-level Error Banner */}
-              <div aria-live="polite" className="min-h-0">
-                <AnimatePresence>
-                  {formError && (
-                    <motion.div
-                      role="alert"
-                      initial={{ opacity: 0, y: prefersReducedMotion ? 0 : -6 }}
-                      animate={{ opacity: 1, y: 0 }}
-                      exit={{ opacity: 0, y: prefersReducedMotion ? 0 : -4 }}
-                      transition={{ duration: 0.2 }}
-                      className="mb-4 p-3.5 rounded-xl bg-rose-950/60 border border-rose-500/40 text-rose-200 text-xs space-y-2"
+                <form onSubmit={handleVerifyEmailSubmit} noValidate className="space-y-4">
+                  <div>
+                    <label
+                      htmlFor={`${baseId}-verify-code`}
+                      className="block text-xs font-medium text-slate-300 mb-1.5"
                     >
-                      <div className="flex items-start gap-2.5">
-                        <AlertCircle
-                          className="w-4 h-4 text-rose-400 shrink-0 mt-0.5"
+                      6-digit verification code
+                    </label>
+                    <input
+                      id={`${baseId}-verify-code`}
+                      type="text"
+                      inputMode="numeric"
+                      autoComplete="one-time-code"
+                      maxLength={6}
+                      value={verificationCode}
+                      onChange={(e) => {
+                        const digits = e.target.value.replace(/\D/g, '').slice(0, 6);
+                        setVerificationCode(digits);
+                        if (verificationError) setVerificationError(null);
+                      }}
+                      placeholder="000000"
+                      className="w-full min-h-[48px] bg-[#0D121D] border border-slate-800 focus:border-cyan-500 rounded-xl px-4 py-2.5 text-center text-lg font-mono tabular-nums tracking-[0.4em] text-white placeholder:text-slate-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 transition-colors"
+                    />
+                  </div>
+
+                  <button
+                    type="submit"
+                    disabled={isVerifying}
+                    className="w-full min-h-[44px] py-2.5 px-4 rounded-xl text-sm font-semibold bg-cyan-500 hover:bg-cyan-400 active:bg-cyan-500 text-slate-950 transition-colors flex items-center justify-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300"
+                  >
+                    {isVerifying ? (
+                      <>
+                        <span
+                          className="w-4 h-4 border-2 border-slate-950 border-t-transparent rounded-full animate-spin"
                           aria-hidden="true"
                         />
-                        <span>{formError}</span>
-                      </div>
+                        <span>Verifying...</span>
+                      </>
+                    ) : (
+                      <>
+                        <span>Verify &amp; Continue</span>
+                        <ArrowRight className="w-4 h-4" aria-hidden="true" />
+                      </>
+                    )}
+                  </button>
+                </form>
 
-                      {formErrorCode === 'email-not-verified' && email.trim() && (
+                <div className="mt-4 flex items-center justify-between text-xs text-slate-400">
+                  <span>Didn&apos;t receive the code?</span>
+                  <button
+                    type="button"
+                    onClick={handleResendVerification}
+                    disabled={resendCooldown > 0 || isResendingCode}
+                    className="min-h-[44px] px-2 font-semibold text-cyan-400 hover:text-cyan-300 disabled:text-slate-500 disabled:cursor-not-allowed transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 rounded-lg font-mono tabular-nums"
+                  >
+                    {isResendingCode
+                      ? 'Sending...'
+                      : resendCooldown > 0
+                        ? `Resend in ${resendCooldown}s`
+                        : 'Resend code'}
+                  </button>
+                </div>
+              </motion.div>
+            ) : (
+              <>
+                {/* Header */}
+                <div className="flex flex-col items-center lg:items-start text-center lg:text-left mb-6">
+                  <div className="flex items-center gap-3 mb-3 lg:hidden">
+                    <IndoorNavLogoMark size="sm" />
+                    <span className="text-lg font-bold tracking-tight text-white">
+                      Indoor Navigation
+                    </span>
+                  </div>
+                  <h1 className="text-2xl font-bold text-white tracking-tight [text-wrap:balance]">
+                    {mode === 'signin' ? 'Sign in to your floor plan' : 'Create your account'}
+                  </h1>
+                  <p className="text-sm text-slate-400 mt-1">
+                    {mode === 'signin'
+                      ? 'Access real-time indoor navigation and live peer tracking.'
+                      : 'Get started with live spatial wayfinding across your building.'}
+                  </p>
+                </div>
+
+                {/* Animated Tab Switch: Sign In / Sign Up */}
+                {!authConfig.disableSignup && (
+                  <div
+                    role="tablist"
+                    aria-label="Authentication mode"
+                    className="grid grid-cols-2 p-1 rounded-xl bg-[#0D121D] border border-slate-800/90 mb-5"
+                  >
+                    {(['signin', 'signup'] as const).map((tab) => {
+                      const active = mode === tab;
+                      return (
+                        <button
+                          key={tab}
+                          type="button"
+                          role="tab"
+                          aria-selected={active}
+                          onClick={() => switchMode(tab)}
+                          className={`relative min-h-[40px] rounded-lg text-sm font-semibold transition-colors whitespace-nowrap focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 ${
+                            active ? 'text-slate-950' : 'text-slate-400 hover:text-white'
+                          }`}
+                        >
+                          {active && (
+                            <motion.span
+                              layoutId="indoor-nav-auth-tab"
+                              transition={
+                                prefersReducedMotion
+                                  ? { duration: 0.1 }
+                                  : { type: 'spring', stiffness: 420, damping: 32 }
+                              }
+                              className="absolute inset-0 rounded-lg bg-cyan-500"
+                            />
+                          )}
+                          <span className="relative z-10">
+                            {tab === 'signin' ? 'Sign In' : 'Sign Up'}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {/* OAuth Providers + "or" divider */}
+                {showOAuthSection && (
+                  <>
+                    <div
+                      className={`grid gap-2.5 ${
+                        hasGoogle && hasGitHub ? 'grid-cols-1 sm:grid-cols-2' : 'grid-cols-1'
+                      }`}
+                    >
+                      {hasGoogle && (
                         <button
                           type="button"
-                          onClick={handleEnterVerificationForUnverified}
-                          className="ml-6 inline-flex items-center gap-1.5 text-xs font-semibold text-cyan-300 hover:text-cyan-200 underline underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 rounded"
+                          onClick={() => handleOAuthContinue('google')}
+                          disabled={busy}
+                          className="w-full min-h-[44px] px-4 py-2.5 rounded-xl bg-[#0D121D] hover:bg-slate-900 border border-slate-800 hover:border-slate-700 text-slate-200 text-sm font-medium transition-colors flex items-center justify-center gap-2.5 whitespace-nowrap disabled:opacity-60 disabled:cursor-not-allowed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400"
                         >
-                          <span>Enter 6-digit verification code</span>
-                          <ArrowRight className="w-3.5 h-3.5" aria-hidden="true" />
+                          {oauthLoading === 'google' ? (
+                            <span
+                              className="w-4 h-4 border-2 border-cyan-400 border-t-transparent rounded-full animate-spin"
+                              aria-hidden="true"
+                            />
+                          ) : (
+                            <GoogleIcon />
+                          )}
+                          <span>{hasGitHub ? 'Google' : 'Continue with Google'}</span>
                         </button>
                       )}
 
-                      {formErrorCode === 'oauth-iframe-blocked' &&
-                        typeof window !== 'undefined' && (
-                          <a
-                            href={window.location.href}
-                            target="_blank"
-                            rel="noopener noreferrer"
+                      {hasGitHub && (
+                        <button
+                          type="button"
+                          onClick={() => handleOAuthContinue('github')}
+                          disabled={busy}
+                          className="w-full min-h-[44px] px-4 py-2.5 rounded-xl bg-[#0D121D] hover:bg-slate-900 border border-slate-800 hover:border-slate-700 text-slate-200 text-sm font-medium transition-colors flex items-center justify-center gap-2.5 whitespace-nowrap disabled:opacity-60 disabled:cursor-not-allowed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400"
+                        >
+                          {oauthLoading === 'github' ? (
+                            <span
+                              className="w-4 h-4 border-2 border-cyan-400 border-t-transparent rounded-full animate-spin"
+                              aria-hidden="true"
+                            />
+                          ) : (
+                            <GitHubIcon />
+                          )}
+                          <span>{hasGoogle ? 'GitHub' : 'Continue with GitHub'}</span>
+                        </button>
+                      )}
+                    </div>
+
+                    <div className="flex items-center gap-3 my-5" aria-hidden="true">
+                      <div className="h-px flex-1 bg-slate-800/90" />
+                      <span className="text-xs font-medium text-slate-500">or</span>
+                      <div className="h-px flex-1 bg-slate-800/90" />
+                    </div>
+                  </>
+                )}
+
+                {/* Form-level Error Banner */}
+                <div aria-live="polite" className="min-h-0">
+                  <AnimatePresence>
+                    {formError && (
+                      <motion.div
+                        role="alert"
+                        initial={{ opacity: 0, y: prefersReducedMotion ? 0 : -6 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        exit={{ opacity: 0, y: prefersReducedMotion ? 0 : -4 }}
+                        transition={{ duration: 0.18 }}
+                        className="mb-4 p-3.5 rounded-xl bg-rose-950/50 border border-rose-500/40 text-rose-200 text-xs space-y-2"
+                      >
+                        <div className="flex items-start gap-2.5">
+                          <AlertCircle
+                            className="w-4 h-4 text-rose-400 shrink-0 mt-0.5"
+                            aria-hidden="true"
+                          />
+                          <span>{formError}</span>
+                        </div>
+
+                        {formErrorCode === 'email-not-verified' && email.trim() && (
+                          <button
+                            type="button"
+                            onClick={handleEnterVerificationForUnverified}
                             className="ml-6 inline-flex items-center gap-1.5 text-xs font-semibold text-cyan-300 hover:text-cyan-200 underline underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 rounded"
                           >
-                            <span>Open in new browser tab</span>
-                            <ExternalLink className="w-3.5 h-3.5" aria-hidden="true" />
-                          </a>
+                            <span>Enter 6-digit verification code</span>
+                            <ArrowRight className="w-3.5 h-3.5" aria-hidden="true" />
+                          </button>
                         )}
-                    </motion.div>
-                  )}
-                </AnimatePresence>
-              </div>
 
-              {/* Auth Form */}
-              <form onSubmit={handleSubmit} noValidate className="space-y-4">
-                <AnimatePresence mode="wait" initial={false}>
-                  {mode === 'signup' && (
-                    <motion.div
-                      key="signup-name"
-                      initial={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: -6 }}
-                      animate={prefersReducedMotion ? { opacity: 1 } : { opacity: 1, y: 0 }}
-                      exit={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: -6 }}
-                      transition={{ duration: 0.18 }}
-                    >
-                      <label
-                        htmlFor={`${baseId}-fullname`}
-                        className="block text-xs font-medium text-slate-200 mb-1.5"
+                        {formErrorCode === 'oauth-iframe-blocked' &&
+                          typeof window !== 'undefined' && (
+                            <a
+                              href={window.location.href}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="ml-6 inline-flex items-center gap-1.5 text-xs font-semibold text-cyan-300 hover:text-cyan-200 underline underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 rounded"
+                            >
+                              <span>Open in new browser tab</span>
+                              <ExternalLink className="w-3.5 h-3.5" aria-hidden="true" />
+                            </a>
+                          )}
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+                </div>
+
+                {/* Auth Form */}
+                <form onSubmit={handleSubmit} noValidate className="space-y-4">
+                  <AnimatePresence mode="wait" initial={false}>
+                    {mode === 'signup' && (
+                      <motion.div
+                        key="signup-name"
+                        initial={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: -6 }}
+                        animate={prefersReducedMotion ? { opacity: 1 } : { opacity: 1, y: 0 }}
+                        exit={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: -6 }}
+                        transition={{ duration: 0.16 }}
                       >
-                        Full name
-                      </label>
-                      <div className="relative">
-                        <User
-                          className="w-4 h-4 text-slate-500 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none"
-                          aria-hidden="true"
-                        />
-                        <input
-                          id={`${baseId}-fullname`}
-                          type="text"
-                          autoComplete="name"
-                          value={fullName}
-                          onChange={(e) => {
-                            setFullName(e.target.value);
-                            clearFieldError('fullName');
-                          }}
-                          placeholder="Alex Morgan"
-                          aria-invalid={Boolean(fieldErrors.fullName)}
-                          aria-describedby={
-                            fieldErrors.fullName ? `${baseId}-fullname-error` : undefined
-                          }
-                          className={`w-full min-h-[44px] bg-[#090D18] border rounded-xl pl-10 pr-3.5 py-2.5 text-sm text-white placeholder:text-slate-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 transition-colors ${
-                            fieldErrors.fullName
-                              ? 'border-rose-500/70'
-                              : 'border-slate-800 focus:border-cyan-500'
-                          }`}
-                        />
-                      </div>
-                      {fieldErrors.fullName && (
-                        <p
-                          id={`${baseId}-fullname-error`}
-                          aria-live="polite"
-                          className="mt-1.5 text-xs text-rose-400 flex items-center gap-1.5"
-                        >
-                          <AlertCircle className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
-                          <span>{fieldErrors.fullName}</span>
-                        </p>
-                      )}
-                    </motion.div>
-                  )}
-                </AnimatePresence>
-
-                {/* Email */}
-                <div>
-                  <label
-                    htmlFor={`${baseId}-email`}
-                    className="block text-xs font-medium text-slate-200 mb-1.5"
-                  >
-                    Email
-                  </label>
-                  <div className="relative">
-                    <Mail
-                      className="w-4 h-4 text-slate-500 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none"
-                      aria-hidden="true"
-                    />
-                    <input
-                      id={`${baseId}-email`}
-                      type="email"
-                      autoComplete="email"
-                      value={email}
-                      onChange={(e) => {
-                        setEmail(e.target.value);
-                        clearFieldError('email');
-                      }}
-                      placeholder="you@company.com"
-                      aria-invalid={Boolean(fieldErrors.email)}
-                      aria-describedby={fieldErrors.email ? `${baseId}-email-error` : undefined}
-                      className={`w-full min-h-[44px] bg-[#090D18] border rounded-xl pl-10 pr-3.5 py-2.5 text-sm text-white placeholder:text-slate-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 transition-colors ${
-                        fieldErrors.email
-                          ? 'border-rose-500/70'
-                          : 'border-slate-800 focus:border-cyan-500'
-                      }`}
-                    />
-                  </div>
-                  {fieldErrors.email && (
-                    <p
-                      id={`${baseId}-email-error`}
-                      aria-live="polite"
-                      className="mt-1.5 text-xs text-rose-400 flex items-center gap-1.5"
-                    >
-                      <AlertCircle className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
-                      <span>{fieldErrors.email}</span>
-                    </p>
-                  )}
-                </div>
-
-                {/* Password */}
-                <div>
-                  <label
-                    htmlFor={`${baseId}-password`}
-                    className="block text-xs font-medium text-slate-200 mb-1.5"
-                  >
-                    Password
-                  </label>
-                  <div className="relative">
-                    <Lock
-                      className="w-4 h-4 text-slate-500 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none"
-                      aria-hidden="true"
-                    />
-                    <input
-                      id={`${baseId}-password`}
-                      type={showPassword ? 'text' : 'password'}
-                      autoComplete={mode === 'signup' ? 'new-password' : 'current-password'}
-                      value={password}
-                      onChange={(e) => {
-                        setPassword(e.target.value);
-                        clearFieldError('password');
-                      }}
-                      placeholder={
-                        mode === 'signup'
-                          ? 'At least 8 characters with a number'
-                          : 'Enter your password'
-                      }
-                      aria-invalid={Boolean(fieldErrors.password)}
-                      aria-describedby={
-                        fieldErrors.password ? `${baseId}-password-error` : undefined
-                      }
-                      className={`w-full min-h-[44px] bg-[#090D18] border rounded-xl pl-10 pr-12 py-2.5 text-sm text-white placeholder:text-slate-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 transition-colors ${
-                        fieldErrors.password
-                          ? 'border-rose-500/70'
-                          : 'border-slate-800 focus:border-cyan-500'
-                      }`}
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setShowPassword((prev) => !prev)}
-                      aria-label={showPassword ? 'Hide password' : 'Show password'}
-                      className="absolute right-0 top-1/2 -translate-y-1/2 w-11 h-11 flex items-center justify-center text-slate-400 hover:text-white rounded-r-xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400"
-                    >
-                      {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                    </button>
-                  </div>
-                  {fieldErrors.password && (
-                    <p
-                      id={`${baseId}-password-error`}
-                      aria-live="polite"
-                      className="mt-1.5 text-xs text-rose-400 flex items-center gap-1.5"
-                    >
-                      <AlertCircle className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
-                      <span>{fieldErrors.password}</span>
-                    </p>
-                  )}
-                </div>
-
-                {/* Confirm Password (Sign Up only) */}
-                <AnimatePresence mode="wait" initial={false}>
-                  {mode === 'signup' && (
-                    <motion.div
-                      key="signup-confirm"
-                      initial={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: -6 }}
-                      animate={prefersReducedMotion ? { opacity: 1 } : { opacity: 1, y: 0 }}
-                      exit={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: -6 }}
-                      transition={{ duration: 0.18 }}
-                      className="space-y-4"
-                    >
-                      <div>
                         <label
-                          htmlFor={`${baseId}-confirm-password`}
-                          className="block text-xs font-medium text-slate-200 mb-1.5"
+                          htmlFor={`${baseId}-fullname`}
+                          className="block text-xs font-medium text-slate-300 mb-1.5"
                         >
-                          Confirm password
+                          Full name
                         </label>
                         <div className="relative">
-                          <Lock
+                          <User
                             className="w-4 h-4 text-slate-500 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none"
                             aria-hidden="true"
                           />
                           <input
-                            id={`${baseId}-confirm-password`}
-                            type={showConfirmPassword ? 'text' : 'password'}
-                            autoComplete="new-password"
-                            value={confirmPassword}
+                            id={`${baseId}-fullname`}
+                            type="text"
+                            autoComplete="name"
+                            value={fullName}
                             onChange={(e) => {
-                              setConfirmPassword(e.target.value);
-                              clearFieldError('confirmPassword');
+                              setFullName(e.target.value);
+                              clearFieldError('fullName');
                             }}
-                            placeholder="Re-enter your password"
-                            aria-invalid={Boolean(fieldErrors.confirmPassword)}
+                            placeholder="Alex Morgan"
+                            aria-invalid={Boolean(fieldErrors.fullName)}
                             aria-describedby={
-                              fieldErrors.confirmPassword ? `${baseId}-confirm-error` : undefined
+                              fieldErrors.fullName ? `${baseId}-fullname-error` : undefined
                             }
-                            className={`w-full min-h-[44px] bg-[#090D18] border rounded-xl pl-10 pr-12 py-2.5 text-sm text-white placeholder:text-slate-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 transition-colors ${
-                              fieldErrors.confirmPassword
+                            className={`w-full min-h-[44px] bg-[#0D121D] border rounded-xl pl-10 pr-3.5 py-2.5 text-sm text-white placeholder:text-slate-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 transition-colors ${
+                              fieldErrors.fullName
                                 ? 'border-rose-500/70'
                                 : 'border-slate-800 focus:border-cyan-500'
                             }`}
                           />
-                          <button
-                            type="button"
-                            onClick={() => setShowConfirmPassword((prev) => !prev)}
-                            aria-label={
-                              showConfirmPassword ? 'Hide confirm password' : 'Show confirm password'
-                            }
-                            className="absolute right-0 top-1/2 -translate-y-1/2 w-11 h-11 flex items-center justify-center text-slate-400 hover:text-white rounded-r-xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400"
-                          >
-                            {showConfirmPassword ? (
-                              <EyeOff className="w-4 h-4" />
-                            ) : (
-                              <Eye className="w-4 h-4" />
-                            )}
-                          </button>
                         </div>
-                        {fieldErrors.confirmPassword && (
+                        {fieldErrors.fullName && (
                           <p
-                            id={`${baseId}-confirm-error`}
+                            id={`${baseId}-fullname-error`}
                             aria-live="polite"
                             className="mt-1.5 text-xs text-rose-400 flex items-center gap-1.5"
                           >
                             <AlertCircle className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
-                            <span>{fieldErrors.confirmPassword}</span>
+                            <span>{fieldErrors.fullName}</span>
                           </p>
                         )}
-                      </div>
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
 
-                      {/* Terms & Privacy Policy Checkbox */}
-                      <div>
-                        <div className="flex items-start gap-2.5 min-h-[44px] py-1">
-                          <input
-                            id={`${baseId}-terms`}
-                            type="checkbox"
-                            checked={agreedToTerms}
-                            onChange={(e) => {
-                              setAgreedToTerms(e.target.checked);
-                              clearFieldError('terms');
-                            }}
-                            aria-invalid={Boolean(fieldErrors.terms)}
-                            aria-describedby={
-                              fieldErrors.terms ? `${baseId}-terms-error` : undefined
-                            }
-                            className="mt-0.5 w-5 h-5 rounded border-slate-700 bg-[#090D18] text-cyan-500 accent-cyan-500 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400"
-                          />
-                          <label
-                            htmlFor={`${baseId}-terms`}
-                            className="text-xs text-slate-300 leading-relaxed cursor-pointer"
-                          >
-                            I agree to{' '}
-                            <button
-                              type="button"
-                              onClick={(e) => {
-                                e.preventDefault();
-                                setIsTermsOpen(true);
-                              }}
-                              className="text-cyan-400 hover:text-cyan-300 underline underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 rounded"
-                            >
-                              Terms &amp; Privacy Policy
-                            </button>
-                          </label>
-                        </div>
-                        {fieldErrors.terms && (
-                          <p
-                            id={`${baseId}-terms-error`}
-                            aria-live="polite"
-                            className="mt-1 text-xs text-rose-400 flex items-center gap-1.5"
-                          >
-                            <AlertCircle className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
-                            <span>{fieldErrors.terms}</span>
-                          </p>
-                        )}
-                      </div>
-                    </motion.div>
-                  )}
-                </AnimatePresence>
-
-                {/* Sign In Options Row: Remember me + Forgot password */}
-                {mode === 'signin' && (
-                  <div className="flex items-center justify-between gap-2">
+                  {/* Email */}
+                  <div>
                     <label
-                      htmlFor={`${baseId}-remember`}
-                      className="inline-flex items-center gap-2.5 min-h-[44px] text-xs text-slate-300 cursor-pointer select-none"
+                      htmlFor={`${baseId}-email`}
+                      className="block text-xs font-medium text-slate-300 mb-1.5"
                     >
-                      <input
-                        id={`${baseId}-remember`}
-                        type="checkbox"
-                        checked={rememberMe}
-                        onChange={(e) => setRememberMe(e.target.checked)}
-                        className="w-4 h-4 rounded border-slate-700 bg-[#090D18] text-cyan-500 accent-cyan-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400"
-                      />
-                      <span>Remember me</span>
+                      Email
                     </label>
-
-                    <button
-                      type="button"
-                      onClick={openForgotModal}
-                      className="min-h-[44px] px-2 text-xs font-medium text-cyan-400 hover:text-cyan-300 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 rounded-lg"
-                    >
-                      Forgot password?
-                    </button>
-                  </div>
-                )}
-
-                {/* Primary Submit Button */}
-                <button
-                  type="submit"
-                  disabled={busy}
-                  className="w-full min-h-[44px] py-3 px-4 rounded-xl text-sm font-bold bg-cyan-500 hover:bg-cyan-400 active:bg-cyan-500 text-slate-950 shadow-lg shadow-cyan-500/20 transition-colors flex items-center justify-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0F172A]"
-                >
-                  {isSubmitting ? (
-                    <>
-                      <span
-                        className="w-4 h-4 border-2 border-slate-950 border-t-transparent rounded-full animate-spin"
+                    <div className="relative">
+                      <Mail
+                        className="w-4 h-4 text-slate-500 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none"
                         aria-hidden="true"
                       />
-                      <span>{mode === 'signup' ? 'Creating account...' : 'Signing in...'}</span>
-                    </>
-                  ) : (
-                    <>
-                      <span>{mode === 'signup' ? 'Create Account' : 'Sign In'}</span>
-                      <ArrowRight className="w-4 h-4" aria-hidden="true" />
-                    </>
+                      <input
+                        id={`${baseId}-email`}
+                        type="email"
+                        autoComplete="email"
+                        value={email}
+                        onChange={(e) => {
+                          setEmail(e.target.value);
+                          clearFieldError('email');
+                        }}
+                        placeholder="you@company.com"
+                        aria-invalid={Boolean(fieldErrors.email)}
+                        aria-describedby={fieldErrors.email ? `${baseId}-email-error` : undefined}
+                        className={`w-full min-h-[44px] bg-[#0D121D] border rounded-xl pl-10 pr-3.5 py-2.5 text-sm text-white placeholder:text-slate-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 transition-colors ${
+                          fieldErrors.email
+                            ? 'border-rose-500/70'
+                            : 'border-slate-800 focus:border-cyan-500'
+                        }`}
+                      />
+                    </div>
+                    {fieldErrors.email && (
+                      <p
+                        id={`${baseId}-email-error`}
+                        aria-live="polite"
+                        className="mt-1.5 text-xs text-rose-400 flex items-center gap-1.5"
+                      >
+                        <AlertCircle className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                        <span>{fieldErrors.email}</span>
+                      </p>
+                    )}
+                  </div>
+
+                  {/* Password */}
+                  <div>
+                    <label
+                      htmlFor={`${baseId}-password`}
+                      className="block text-xs font-medium text-slate-300 mb-1.5"
+                    >
+                      Password
+                    </label>
+                    <div className="relative">
+                      <Lock
+                        className="w-4 h-4 text-slate-500 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none"
+                        aria-hidden="true"
+                      />
+                      <input
+                        id={`${baseId}-password`}
+                        type={showPassword ? 'text' : 'password'}
+                        autoComplete={mode === 'signup' ? 'new-password' : 'current-password'}
+                        value={password}
+                        onChange={(e) => {
+                          setPassword(e.target.value);
+                          clearFieldError('password');
+                        }}
+                        placeholder={
+                          mode === 'signup'
+                            ? 'At least 8 characters with a number'
+                            : 'Enter your password'
+                        }
+                        aria-invalid={Boolean(fieldErrors.password)}
+                        aria-describedby={
+                          fieldErrors.password ? `${baseId}-password-error` : undefined
+                        }
+                        className={`w-full min-h-[44px] bg-[#0D121D] border rounded-xl pl-10 pr-12 py-2.5 text-sm text-white placeholder:text-slate-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 transition-colors ${
+                          fieldErrors.password
+                            ? 'border-rose-500/70'
+                            : 'border-slate-800 focus:border-cyan-500'
+                        }`}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowPassword((prev) => !prev)}
+                        aria-label={showPassword ? 'Hide password' : 'Show password'}
+                        className="absolute right-0 top-1/2 -translate-y-1/2 w-11 h-11 flex items-center justify-center text-slate-400 hover:text-white rounded-r-xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400"
+                      >
+                        {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                      </button>
+                    </div>
+                    {fieldErrors.password && (
+                      <p
+                        id={`${baseId}-password-error`}
+                        aria-live="polite"
+                        className="mt-1.5 text-xs text-rose-400 flex items-center gap-1.5"
+                      >
+                        <AlertCircle className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                        <span>{fieldErrors.password}</span>
+                      </p>
+                    )}
+                  </div>
+
+                  {/* Confirm Password (Sign Up only) */}
+                  <AnimatePresence mode="wait" initial={false}>
+                    {mode === 'signup' && (
+                      <motion.div
+                        key="signup-confirm"
+                        initial={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: -6 }}
+                        animate={prefersReducedMotion ? { opacity: 1 } : { opacity: 1, y: 0 }}
+                        exit={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: -6 }}
+                        transition={{ duration: 0.16 }}
+                        className="space-y-4"
+                      >
+                        <div>
+                          <label
+                            htmlFor={`${baseId}-confirm-password`}
+                            className="block text-xs font-medium text-slate-300 mb-1.5"
+                          >
+                            Confirm password
+                          </label>
+                          <div className="relative">
+                            <Lock
+                              className="w-4 h-4 text-slate-500 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none"
+                              aria-hidden="true"
+                            />
+                            <input
+                              id={`${baseId}-confirm-password`}
+                              type={showConfirmPassword ? 'text' : 'password'}
+                              autoComplete="new-password"
+                              value={confirmPassword}
+                              onChange={(e) => {
+                                setConfirmPassword(e.target.value);
+                                clearFieldError('confirmPassword');
+                              }}
+                              placeholder="Re-enter your password"
+                              aria-invalid={Boolean(fieldErrors.confirmPassword)}
+                              aria-describedby={
+                                fieldErrors.confirmPassword ? `${baseId}-confirm-error` : undefined
+                              }
+                              className={`w-full min-h-[44px] bg-[#0D121D] border rounded-xl pl-10 pr-12 py-2.5 text-sm text-white placeholder:text-slate-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 transition-colors ${
+                                fieldErrors.confirmPassword
+                                  ? 'border-rose-500/70'
+                                  : 'border-slate-800 focus:border-cyan-500'
+                              }`}
+                            />
+                            <button
+                              type="button"
+                              onClick={() => setShowConfirmPassword((prev) => !prev)}
+                              aria-label={
+                                showConfirmPassword
+                                  ? 'Hide confirm password'
+                                  : 'Show confirm password'
+                              }
+                              className="absolute right-0 top-1/2 -translate-y-1/2 w-11 h-11 flex items-center justify-center text-slate-400 hover:text-white rounded-r-xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400"
+                            >
+                              {showConfirmPassword ? (
+                                <EyeOff className="w-4 h-4" />
+                              ) : (
+                                <Eye className="w-4 h-4" />
+                              )}
+                            </button>
+                          </div>
+                          {fieldErrors.confirmPassword && (
+                            <p
+                              id={`${baseId}-confirm-error`}
+                              aria-live="polite"
+                              className="mt-1.5 text-xs text-rose-400 flex items-center gap-1.5"
+                            >
+                              <AlertCircle className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                              <span>{fieldErrors.confirmPassword}</span>
+                            </p>
+                          )}
+                        </div>
+
+                        {/* Terms & Privacy Policy Checkbox */}
+                        <div>
+                          <div className="flex items-start gap-2.5 min-h-[44px] py-1">
+                            <input
+                              id={`${baseId}-terms`}
+                              type="checkbox"
+                              checked={agreedToTerms}
+                              onChange={(e) => {
+                                setAgreedToTerms(e.target.checked);
+                                clearFieldError('terms');
+                              }}
+                              aria-invalid={Boolean(fieldErrors.terms)}
+                              aria-describedby={
+                                fieldErrors.terms ? `${baseId}-terms-error` : undefined
+                              }
+                              className="mt-0.5 w-4 h-4 rounded border-slate-700 bg-[#0D121D] text-cyan-500 accent-cyan-500 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400"
+                            />
+                            <label
+                              htmlFor={`${baseId}-terms`}
+                              className="text-xs text-slate-300 leading-relaxed cursor-pointer"
+                            >
+                              I agree to{' '}
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.preventDefault();
+                                  setIsTermsOpen(true);
+                                }}
+                                className="text-cyan-400 hover:text-cyan-300 underline underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 rounded"
+                              >
+                                Terms &amp; Privacy Policy
+                              </button>
+                            </label>
+                          </div>
+                          {fieldErrors.terms && (
+                            <p
+                              id={`${baseId}-terms-error`}
+                              aria-live="polite"
+                              className="mt-1 text-xs text-rose-400 flex items-center gap-1.5"
+                            >
+                              <AlertCircle className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                              <span>{fieldErrors.terms}</span>
+                            </p>
+                          )}
+                        </div>
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+
+                  {/* Sign In Options Row */}
+                  {mode === 'signin' && (
+                    <div className="flex items-center justify-between gap-2">
+                      <label
+                        htmlFor={`${baseId}-remember`}
+                        className="inline-flex items-center gap-2.5 min-h-[44px] text-xs text-slate-300 cursor-pointer select-none"
+                      >
+                        <input
+                          id={`${baseId}-remember`}
+                          type="checkbox"
+                          checked={rememberMe}
+                          onChange={(e) => setRememberMe(e.target.checked)}
+                          className="w-4 h-4 rounded border-slate-700 bg-[#0D121D] text-cyan-500 accent-cyan-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400"
+                        />
+                        <span>Remember me</span>
+                      </label>
+
+                      <button
+                        type="button"
+                        onClick={openForgotModal}
+                        className="min-h-[44px] px-2 text-xs font-medium text-cyan-400 hover:text-cyan-300 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 rounded-lg"
+                      >
+                        Forgot password?
+                      </button>
+                    </div>
                   )}
-                </button>
-              </form>
-            </>
-          )}
+
+                  {/* Primary Submit Button */}
+                  <button
+                    type="submit"
+                    disabled={busy}
+                    className="w-full min-h-[44px] py-2.5 px-4 rounded-xl text-sm font-semibold bg-cyan-500 hover:bg-cyan-400 active:bg-cyan-500 text-slate-950 transition-colors flex items-center justify-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300 focus-visible:ring-offset-2 focus-visible:ring-offset-[#111622]"
+                  >
+                    {isSubmitting ? (
+                      <>
+                        <span
+                          className="w-4 h-4 border-2 border-slate-950 border-t-transparent rounded-full animate-spin"
+                          aria-hidden="true"
+                        />
+                        <span>{mode === 'signup' ? 'Creating account...' : 'Signing in...'}</span>
+                      </>
+                    ) : (
+                      <>
+                        <span>{mode === 'signup' ? 'Create Account' : 'Sign In'}</span>
+                        <ArrowRight className="w-4 h-4" aria-hidden="true" />
+                      </>
+                    )}
+                  </button>
+                </form>
+              </>
+            )}
+          </div>
         </div>
       </div>
 
@@ -1197,18 +1245,21 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            transition={{ duration: 0.2 }}
+            transition={{ duration: 0.18 }}
+            onClick={(e) => {
+              if (e.target === e.currentTarget) setIsForgotOpen(false);
+            }}
             className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm"
             role="dialog"
             aria-modal="true"
             aria-labelledby={`${baseId}-forgot-title`}
           >
             <motion.div
-              initial={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, scale: 0.96, y: 8 }}
+              initial={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, scale: 0.97, y: 8 }}
               animate={prefersReducedMotion ? { opacity: 1 } : { opacity: 1, scale: 1, y: 0 }}
-              exit={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, scale: 0.96, y: 8 }}
-              transition={{ duration: 0.2 }}
-              className="w-full max-w-md bg-[#0F172A] border border-slate-800 rounded-2xl p-6 shadow-2xl"
+              exit={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, scale: 0.97, y: 8 }}
+              transition={{ duration: 0.18 }}
+              className="w-full max-w-md bg-[#111622] border border-slate-800 rounded-2xl p-6 shadow-2xl"
             >
               <div className="flex items-start justify-between gap-4 mb-4">
                 <div>
@@ -1227,7 +1278,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
                   type="button"
                   onClick={() => setIsForgotOpen(false)}
                   aria-label="Close password reset dialog"
-                  className="w-11 h-11 -mt-2 -mr-2 rounded-xl text-slate-400 hover:text-white hover:bg-slate-800 flex items-center justify-center transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400"
+                  className="w-10 h-10 -mt-1 -mr-1 rounded-xl text-slate-400 hover:text-white hover:bg-slate-800 flex items-center justify-center transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400"
                 >
                   <X className="w-5 h-5" />
                 </button>
@@ -1237,7 +1288,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
                 <div
                   role="status"
                   aria-live="polite"
-                  className="mb-4 p-3 rounded-xl bg-cyan-950/50 border border-cyan-500/30 text-cyan-100 text-xs flex items-start gap-2"
+                  className="mb-4 p-3 rounded-xl bg-cyan-950/40 border border-cyan-500/30 text-cyan-100 text-xs flex items-start gap-2"
                 >
                   <CheckCircle2 className="w-4 h-4 text-cyan-400 shrink-0 mt-0.5" aria-hidden="true" />
                   <span>{resetNotice}</span>
@@ -1249,7 +1300,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
                   id={`${baseId}-reset-error`}
                   role="alert"
                   aria-live="polite"
-                  className="mb-4 p-3 rounded-xl bg-rose-950/60 border border-rose-500/40 text-rose-200 text-xs flex items-start gap-2"
+                  className="mb-4 p-3 rounded-xl bg-rose-950/50 border border-rose-500/40 text-rose-200 text-xs flex items-start gap-2"
                 >
                   <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" aria-hidden="true" />
                   <span>{resetError}</span>
@@ -1261,7 +1312,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
                   <div
                     role="status"
                     aria-live="polite"
-                    className="p-4 rounded-xl bg-emerald-950/60 border border-emerald-500/40 text-emerald-200 text-xs flex items-start gap-2.5"
+                    className="p-4 rounded-xl bg-emerald-950/50 border border-emerald-500/40 text-emerald-200 text-xs flex items-start gap-2.5"
                   >
                     <CheckCircle2
                       className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5"
@@ -1279,7 +1330,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
                       setMode('signin');
                       setIsForgotOpen(false);
                     }}
-                    className="w-full min-h-[44px] py-2.5 px-4 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 text-sm font-bold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300"
+                    className="w-full min-h-[44px] py-2.5 px-4 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 text-sm font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300"
                   >
                     Back to Sign In
                   </button>
@@ -1289,7 +1340,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
                   <div>
                     <label
                       htmlFor={`${baseId}-reset-code`}
-                      className="block text-xs font-medium text-slate-200 mb-1.5"
+                      className="block text-xs font-medium text-slate-300 mb-1.5"
                     >
                       6-digit reset code
                     </label>
@@ -1305,14 +1356,14 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
                         if (resetError) setResetError(null);
                       }}
                       placeholder="000000"
-                      className="w-full min-h-[44px] bg-[#090D18] border border-slate-800 focus:border-cyan-500 rounded-xl px-3.5 py-2.5 text-center text-base font-mono tracking-[0.35em] text-white placeholder:text-slate-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400"
+                      className="w-full min-h-[44px] bg-[#0D121D] border border-slate-800 focus:border-cyan-500 rounded-xl px-3.5 py-2.5 text-center text-base font-mono tabular-nums tracking-[0.35em] text-white placeholder:text-slate-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400"
                     />
                   </div>
 
                   <div>
                     <label
                       htmlFor={`${baseId}-reset-new-password`}
-                      className="block text-xs font-medium text-slate-200 mb-1.5"
+                      className="block text-xs font-medium text-slate-300 mb-1.5"
                     >
                       New password
                     </label>
@@ -1331,7 +1382,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
                           if (resetError) setResetError(null);
                         }}
                         placeholder="At least 8 characters with a number"
-                        className="w-full min-h-[44px] bg-[#090D18] border border-slate-800 focus:border-cyan-500 rounded-xl pl-10 pr-12 py-2.5 text-sm text-white placeholder:text-slate-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400"
+                        className="w-full min-h-[44px] bg-[#0D121D] border border-slate-800 focus:border-cyan-500 rounded-xl pl-10 pr-12 py-2.5 text-sm text-white placeholder:text-slate-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400"
                       />
                       <button
                         type="button"
@@ -1351,7 +1402,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
                   <div>
                     <label
                       htmlFor={`${baseId}-reset-confirm-password`}
-                      className="block text-xs font-medium text-slate-200 mb-1.5"
+                      className="block text-xs font-medium text-slate-300 mb-1.5"
                     >
                       Confirm new password
                     </label>
@@ -1370,7 +1421,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
                           if (resetError) setResetError(null);
                         }}
                         placeholder="Re-enter new password"
-                        className="w-full min-h-[44px] bg-[#090D18] border border-slate-800 focus:border-cyan-500 rounded-xl pl-10 pr-12 py-2.5 text-sm text-white placeholder:text-slate-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400"
+                        className="w-full min-h-[44px] bg-[#0D121D] border border-slate-800 focus:border-cyan-500 rounded-xl pl-10 pr-12 py-2.5 text-sm text-white placeholder:text-slate-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400"
                       />
                       <button
                         type="button"
@@ -1403,7 +1454,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
                     <button
                       type="submit"
                       disabled={isResetSubmitting}
-                      className="flex-1 min-h-[44px] py-2.5 px-4 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 text-sm font-bold transition-colors flex items-center justify-center gap-2 disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300"
+                      className="flex-1 min-h-[44px] py-2.5 px-4 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 text-sm font-semibold transition-colors flex items-center justify-center gap-2 disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300"
                     >
                       {isResetSubmitting && (
                         <span
@@ -1420,7 +1471,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
                   <div>
                     <label
                       htmlFor={`${baseId}-reset-email`}
-                      className="block text-xs font-medium text-slate-200 mb-1.5"
+                      className="block text-xs font-medium text-slate-300 mb-1.5"
                     >
                       Email
                     </label>
@@ -1441,7 +1492,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
                         placeholder="you@company.com"
                         aria-invalid={Boolean(resetError)}
                         aria-describedby={resetError ? `${baseId}-reset-error` : undefined}
-                        className={`w-full min-h-[44px] bg-[#090D18] border rounded-xl pl-10 pr-3.5 py-2.5 text-sm text-white placeholder:text-slate-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 ${
+                        className={`w-full min-h-[44px] bg-[#0D121D] border rounded-xl pl-10 pr-3.5 py-2.5 text-sm text-white placeholder:text-slate-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 ${
                           resetError ? 'border-rose-500/70' : 'border-slate-800 focus:border-cyan-500'
                         }`}
                       />
@@ -1459,7 +1510,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
                     <button
                       type="submit"
                       disabled={isResetSubmitting}
-                      className="flex-1 min-h-[44px] py-2.5 px-4 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 text-sm font-bold transition-colors flex items-center justify-center gap-2 disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300"
+                      className="flex-1 min-h-[44px] py-2.5 px-4 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 text-sm font-semibold transition-colors flex items-center justify-center gap-2 disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300"
                     >
                       {isResetSubmitting && (
                         <span
@@ -1484,18 +1535,21 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            transition={{ duration: 0.2 }}
+            transition={{ duration: 0.18 }}
+            onClick={(e) => {
+              if (e.target === e.currentTarget) setIsTermsOpen(false);
+            }}
             className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm"
             role="dialog"
             aria-modal="true"
             aria-labelledby={`${baseId}-terms-title`}
           >
             <motion.div
-              initial={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, scale: 0.96, y: 8 }}
+              initial={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, scale: 0.97, y: 8 }}
               animate={prefersReducedMotion ? { opacity: 1 } : { opacity: 1, scale: 1, y: 0 }}
-              exit={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, scale: 0.96, y: 8 }}
-              transition={{ duration: 0.2 }}
-              className="w-full max-w-md bg-[#0F172A] border border-slate-800 rounded-2xl p-6 shadow-2xl"
+              exit={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, scale: 0.97, y: 8 }}
+              transition={{ duration: 0.18 }}
+              className="w-full max-w-md bg-[#111622] border border-slate-800 rounded-2xl p-6 shadow-2xl"
             >
               <div className="flex items-start justify-between gap-4 mb-4">
                 <h2 id={`${baseId}-terms-title`} className="text-lg font-bold text-white">
@@ -1505,7 +1559,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
                   type="button"
                   onClick={() => setIsTermsOpen(false)}
                   aria-label="Close terms dialog"
-                  className="w-11 h-11 -mt-2 -mr-2 rounded-xl text-slate-400 hover:text-white hover:bg-slate-800 flex items-center justify-center transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400"
+                  className="w-10 h-10 -mt-1 -mr-1 rounded-xl text-slate-400 hover:text-white hover:bg-slate-800 flex items-center justify-center transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400"
                 >
                   <X className="w-5 h-5" />
                 </button>
@@ -1525,7 +1579,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
                   clearFieldError('terms');
                   setIsTermsOpen(false);
                 }}
-                className="mt-5 w-full min-h-[44px] py-2.5 px-4 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 text-sm font-bold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300"
+                className="mt-5 w-full min-h-[44px] py-2.5 px-4 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 text-sm font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300"
               >
                 Agree &amp; Close
               </button>

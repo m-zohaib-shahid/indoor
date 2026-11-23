@@ -25,8 +25,8 @@ class AppErrorBoundary extends React.Component<
   render() {
     if (this.state.hasError) {
       return (
-        <div className="min-h-screen w-full bg-[#070B14] text-slate-100 flex items-center justify-center p-6">
-          <div className="max-w-md w-full bg-[#0F172A] border border-slate-800 rounded-2xl p-6 text-center space-y-4 shadow-2xl">
+        <div className="min-h-screen w-full bg-[#0B0F17] text-slate-100 flex items-center justify-center p-6">
+          <div className="max-w-md w-full bg-[#111622] border border-slate-800 rounded-2xl p-6 text-center space-y-4 shadow-2xl">
             <h1 className="text-lg font-bold text-white">Indoor Navigation</h1>
             <p className="text-sm text-slate-400">
               The interface encountered an unexpected issue. Reload to continue.
@@ -101,7 +101,7 @@ export default function App() {
   return (
     <AppErrorBoundary>
       <MotionConfig reducedMotion="user">
-        <div className="relative min-h-screen bg-[#070B14] select-none overflow-x-hidden">
+        <div className="relative min-h-screen bg-[#0B0F17] select-none overflow-x-hidden">
           <AnimatePresence mode="wait">
             {screen === 'splash' && (
               <motion.div

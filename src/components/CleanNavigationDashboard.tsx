@@ -8,6 +8,13 @@ import {
   CheckCircle2,
   Clock,
   Smartphone,
+  Search,
+  MapPin,
+  Plus,
+  Minus,
+  LocateFixed,
+  Maximize2,
+  ChevronUp,
 } from 'lucide-react';
 import { BuildingPeer, SimulatorNode, SimulatorEdge, UserPose } from '../types/simulator';
 import { runAStarBetweenCoordinates } from '../utils/simulatorEngine';
@@ -24,11 +31,41 @@ interface CleanNavigationDashboardProps {
   onSignOut: () => void;
 }
 
+type DirectoryTab = 'people' | 'rooms';
+
+interface MapCamera {
+  scale: number; // pixels per meter
+  panX: number;  // screen px offset of world origin (0,0)
+  panY: number;
+}
+
+const WORLD_BOUNDS = {
+  minX: 1.0,
+  maxX: 31.0,
+  minY: 1.0,
+  maxY: 24.1,
+  width: 30.0,
+  height: 23.1,
+  centerX: 16.0,
+  centerY: 12.55,
+};
+
+const ROOM_CODES: Record<string, string> = {
+  room_101: '101',
+  room_102: '102',
+  room_103: '103',
+  room_104: '104',
+  room_105: '105',
+  corr_center: 'ATRIUM',
+};
+
 export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> = ({
   currentUser,
   onSignOut,
 }) => {
+  const mapContainerRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+
   const stepDetectorRef = useRef<AntiShakeStepDetector>(new AntiShakeStepDetector());
   const headingRef = useRef<number>(90);
   const rawHeadingRef = useRef<number | null>(null);
@@ -38,8 +75,42 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
   const sensorCleanupRef = useRef<(() => void) | null>(null);
   const shakeHintTimerRef = useRef<number | null>(null);
 
-  // Scale: 1 meter = 24 canvas pixels for crisp, generous display
-  const METERS_TO_PX = 24;
+  // Viewport size & interactive pan/zoom camera
+  const [viewportSize, setViewportSize] = useState<{ width: number; height: number }>({
+    width: 960,
+    height: 700,
+  });
+  const [camera, setCamera] = useState<MapCamera>({
+    scale: 26,
+    panX: 80,
+    panY: 40,
+  });
+  const cameraInitializedRef = useRef(false);
+
+  // Pointer & Touch gesture tracking for smooth pan/pinch-zoom without breaking tap selection
+  const pointerStateRef = useRef<{
+    isDragging: boolean;
+    movedPx: number;
+    startX: number;
+    startY: number;
+    origPanX: number;
+    origPanY: number;
+    pinchDist: number | null;
+    pinchMidX: number;
+    pinchMidY: number;
+    origScale: number;
+  }>({
+    isDragging: false,
+    movedPx: 0,
+    startX: 0,
+    startY: 0,
+    origPanX: 0,
+    origPanY: 0,
+    pinchDist: null,
+    pinchMidX: 0,
+    pinchMidY: 0,
+    origScale: 26,
+  });
 
   // Active Building Peers (Multi-User Network)
   const [peers, setPeers] = useState<BuildingPeer[]>([
@@ -54,7 +125,7 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
       floor: 1,
       isOnline: true,
       avatarColor: '#F59E0B',
-      lastUpdated: 'Just now',
+      lastUpdated: 'Live',
     },
     {
       id: 'peer_sarah',
@@ -67,20 +138,20 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
       floor: 1,
       isOnline: true,
       avatarColor: '#EC4899',
-      lastUpdated: '1s ago',
+      lastUpdated: 'Live',
     },
     {
       id: 'peer_marcus',
       fullName: 'Marcus Vance',
       email: 'm.vance@enterprise.io',
       role: 'Director of Product',
-      department: 'Conf Room A',
+      department: 'Conference Room A',
       x: 25.0,
       y: 6.5,
       floor: 1,
       isOnline: true,
-      avatarColor: '#8B5CF6',
-      lastUpdated: '2s ago',
+      avatarColor: '#38BDF8',
+      lastUpdated: 'Live',
     },
     {
       id: 'peer_elena',
@@ -93,41 +164,50 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
       floor: 1,
       isOnline: true,
       avatarColor: '#10B981',
-      lastUpdated: 'Just now',
+      lastUpdated: 'Live',
     },
   ]);
 
-  // Topological corridor nodes for building floor plan
-  const nodes: SimulatorNode[] = useMemo(() => [
-    { id: 'room_101', label: 'Lab 101', x: 7, y: 6.5, floor: 1, type: 'room' },
-    { id: 'room_102', label: 'Conference Room A', x: 25, y: 6.5, floor: 1, type: 'room' },
-    { id: 'room_103', label: 'Cafeteria', x: 7, y: 19.5, floor: 1, type: 'room' },
-    { id: 'room_104', label: 'Executive Suite', x: 25, y: 19.5, floor: 1, type: 'room' },
-    { id: 'room_105', label: 'Server Hub', x: 16, y: 3.5, floor: 1, type: 'room' },
-    { id: 'corr_center', label: 'Central Atrium', x: 16, y: 13, floor: 1, type: 'corridor' },
-    { id: 'corr_north', label: 'North Corridor', x: 16, y: 6.5, floor: 1, type: 'corridor' },
-    { id: 'corr_south', label: 'South Corridor', x: 16, y: 19.5, floor: 1, type: 'corridor' },
-    { id: 'corr_west', label: 'West Hallway', x: 10.5, y: 13, floor: 1, type: 'corridor' },
-    { id: 'corr_east', label: 'East Hallway', x: 21.5, y: 13, floor: 1, type: 'corridor' },
-  ], []);
+  const nodes: SimulatorNode[] = useMemo(
+    () => [
+      { id: 'room_101', label: 'Lab 101', x: 7, y: 6.5, floor: 1, type: 'room' },
+      { id: 'room_102', label: 'Conference Room A', x: 25, y: 6.5, floor: 1, type: 'room' },
+      { id: 'room_103', label: 'Cafeteria', x: 7, y: 19.5, floor: 1, type: 'room' },
+      { id: 'room_104', label: 'Executive Suite', x: 25, y: 19.5, floor: 1, type: 'room' },
+      { id: 'room_105', label: 'Server Hub', x: 16, y: 3.5, floor: 1, type: 'room' },
+      { id: 'corr_center', label: 'Central Atrium', x: 16, y: 13, floor: 1, type: 'corridor' },
+      { id: 'corr_north', label: 'North Corridor', x: 16, y: 6.5, floor: 1, type: 'corridor' },
+      { id: 'corr_south', label: 'South Corridor', x: 16, y: 19.5, floor: 1, type: 'corridor' },
+      { id: 'corr_west', label: 'West Hallway', x: 10.5, y: 13, floor: 1, type: 'corridor' },
+      { id: 'corr_east', label: 'East Hallway', x: 21.5, y: 13, floor: 1, type: 'corridor' },
+    ],
+    []
+  );
 
-  const edges: SimulatorEdge[] = useMemo(() => [
-    { fromId: 'corr_center', toId: 'corr_north', weight: 6.5 },
-    { fromId: 'corr_center', toId: 'corr_south', weight: 6.5 },
-    { fromId: 'corr_center', toId: 'corr_west', weight: 5.5 },
-    { fromId: 'corr_center', toId: 'corr_east', weight: 5.5 },
-    { fromId: 'corr_north', toId: 'room_101', weight: 9 },
-    { fromId: 'corr_north', toId: 'room_102', weight: 9 },
-    { fromId: 'corr_north', toId: 'room_105', weight: 3 },
-    { fromId: 'corr_south', toId: 'room_103', weight: 9 },
-    { fromId: 'corr_south', toId: 'room_104', weight: 9 },
-    { fromId: 'corr_west', toId: 'room_101', weight: 7.4 },
-    { fromId: 'corr_west', toId: 'room_103', weight: 7.4 },
-    { fromId: 'corr_east', toId: 'room_102', weight: 7.4 },
-    { fromId: 'corr_east', toId: 'room_104', weight: 7.4 },
-  ], []);
+  const edges: SimulatorEdge[] = useMemo(
+    () => [
+      { fromId: 'corr_center', toId: 'corr_north', weight: 6.5 },
+      { fromId: 'corr_center', toId: 'corr_south', weight: 6.5 },
+      { fromId: 'corr_center', toId: 'corr_west', weight: 5.5 },
+      { fromId: 'corr_center', toId: 'corr_east', weight: 5.5 },
+      { fromId: 'corr_north', toId: 'room_101', weight: 9 },
+      { fromId: 'corr_north', toId: 'room_102', weight: 9 },
+      { fromId: 'corr_north', toId: 'room_105', weight: 3 },
+      { fromId: 'corr_south', toId: 'room_103', weight: 9 },
+      { fromId: 'corr_south', toId: 'room_104', weight: 9 },
+      { fromId: 'corr_west', toId: 'room_101', weight: 7.4 },
+      { fromId: 'corr_west', toId: 'room_103', weight: 7.4 },
+      { fromId: 'corr_east', toId: 'room_102', weight: 7.4 },
+      { fromId: 'corr_east', toId: 'room_104', weight: 7.4 },
+    ],
+    []
+  );
 
-  // Current User Position & Motion State
+  const roomDestinations = useMemo(
+    () => nodes.filter((n) => n.type === 'room'),
+    [nodes]
+  );
+
   const [userPose, setUserPose] = useState<UserPose>({
     x: 16.0,
     y: 13.0,
@@ -138,20 +218,107 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
     accuracy: 1.0,
   });
 
-  // Navigation Target (Peer User or Room)
   const [targetPeerId, setTargetPeerId] = useState<string | null>('peer_hassaan');
   const [targetRoomId, setTargetRoomId] = useState<string | null>(null);
 
-  // Active Users Slide-Over Drawer
-  const [isDrawerOpen, setIsDrawerOpen] = useState(false);
+  // Mobile Bottom Sheet Directory State (desktop uses always-visible left sidebar)
+  const [isMobileSheetOpen, setIsMobileSheetOpen] = useState(false);
+  const [directoryTab, setDirectoryTab] = useState<DirectoryTab>('people');
+  const [directorySearch, setDirectorySearch] = useState('');
 
-  // Motion sensors state (location updates strictly via PDR motion sensors)
+  // Motion sensors state
   const [motionSensorsActive, setMotionSensorsActive] = useState(false);
-  const [sensorStatusMessage, setSensorStatusMessage] = useState<string>('Enable Sensors');
+  const [sensorStatusMessage, setSensorStatusMessage] = useState<string>('Enable Motion');
   const [pulseAnim, setPulseAnim] = useState(0);
 
-  // Step Forward immediately along the live headingRef direction (zero-lag PDR)
-  const stepForward = useCallback((stepLength = 0.70) => {
+  // Compute camera that fits the entire Floor 1 neatly inside any viewport (portrait phone or wide desktop)
+  const computeFitCamera = useCallback((w: number, h: number): MapCamera => {
+    const isCompact = w < 640;
+    const padX = isCompact ? 20 : 56;
+    const padTop = isCompact ? 28 : 96;
+    const padBottom = isCompact ? 28 : 56;
+    const availW = Math.max(160, w - padX * 2);
+    const availH = Math.max(160, h - padTop - padBottom);
+    const scale = Math.max(
+      10,
+      Math.min(44, Math.min(availW / WORLD_BOUNDS.width, availH / WORLD_BOUNDS.height))
+    );
+    const panX = w / 2 - WORLD_BOUNDS.centerX * scale;
+    const panY = padTop + availH / 2 - WORLD_BOUNDS.centerY * scale;
+    return { scale, panX, panY };
+  }, []);
+
+  const fitFloorPlan = useCallback(() => {
+    setCamera(computeFitCamera(viewportSize.width, viewportSize.height));
+  }, [computeFitCamera, viewportSize.width, viewportSize.height]);
+
+  const centerOnUser = useCallback(() => {
+    setCamera((prev) => {
+      const targetScale = Math.max(prev.scale, viewportSize.width < 640 ? 22 : 28);
+      return {
+        scale: targetScale,
+        panX: viewportSize.width / 2 - userPose.x * targetScale,
+        panY: viewportSize.height / 2 - userPose.y * targetScale,
+      };
+    });
+  }, [userPose.x, userPose.y, viewportSize.width, viewportSize.height]);
+
+  const zoomBy = useCallback(
+    (factor: number, focusX?: number, focusY?: number) => {
+      setCamera((prev) => {
+        const nextScale = Math.max(10, Math.min(72, prev.scale * factor));
+        const fx = focusX ?? viewportSize.width / 2;
+        const fy = focusY ?? viewportSize.height / 2;
+        const worldX = (fx - prev.panX) / prev.scale;
+        const worldY = (fy - prev.panY) / prev.scale;
+        return {
+          scale: nextScale,
+          panX: fx - worldX * nextScale,
+          panY: fy - worldY * nextScale,
+        };
+      });
+    },
+    [viewportSize.width, viewportSize.height]
+  );
+
+  // Measure map viewport via ResizeObserver so canvas fills 100% of screen on any phone or desktop
+  useEffect(() => {
+    const el = mapContainerRef.current;
+    if (!el) return;
+
+    const updateSize = () => {
+      const rect = el.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0) {
+        const w = Math.round(rect.width);
+        const h = Math.round(rect.height);
+        setViewportSize({ width: w, height: h });
+        if (!cameraInitializedRef.current) {
+          cameraInitializedRef.current = true;
+          setCamera(computeFitCamera(w, h));
+        }
+      }
+    };
+
+    updateSize();
+    const observer = new ResizeObserver(updateSize);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [computeFitCamera]);
+
+  // Close mobile sheet on Escape
+  useEffect(() => {
+    if (!isMobileSheetOpen) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setIsMobileSheetOpen(false);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [isMobileSheetOpen]);
+
+  // Step Forward immediately along live headingRef direction
+  const stepForward = useCallback((stepLength = 0.7) => {
     setUserPose((prev) => {
       const liveHeading = headingRef.current;
       const headingRad = ((liveHeading - 90) * Math.PI) / 180;
@@ -183,7 +350,6 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
     });
   }, []);
 
-  // Active Target Information
   const activeTarget = useMemo(() => {
     if (targetPeerId) {
       const peer = peers.find((p) => p.id === targetPeerId);
@@ -191,7 +357,7 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
         return {
           id: peer.id,
           name: peer.fullName,
-          subtext: `${peer.department} • ${peer.role}`,
+          subtext: `${peer.department} · ${peer.role}`,
           coords: { x: peer.x, y: peer.y },
           isPeer: true,
         };
@@ -203,7 +369,7 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
         return {
           id: room.id,
           name: room.label,
-          subtext: 'Building Landmark',
+          subtext: `Room ${ROOM_CODES[room.id] || ''} · Floor 1`,
           coords: { x: room.x, y: room.y },
           isPeer: false,
         };
@@ -212,7 +378,6 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
     return null;
   }, [targetPeerId, targetRoomId, peers, nodes]);
 
-  // Compute live continuous A* path connecting (userPose.x, userPose.y) directly to (target.x, target.y)
   const activeRoute = useMemo(() => {
     if (!activeTarget) return null;
     return runAStarBetweenCoordinates(
@@ -223,7 +388,6 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
     );
   }, [userPose.x, userPose.y, activeTarget, nodes, edges]);
 
-  // Live Metric Distance Calculation
   const liveDirectDistance = useMemo(() => {
     if (!activeTarget) return 0;
     return Math.hypot(activeTarget.coords.x - userPose.x, activeTarget.coords.y - userPose.y);
@@ -237,31 +401,45 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
     return liveDirectDistance;
   }, [activeRoute, liveDirectDistance, activeTarget]);
 
-  // Arrival threshold: under 1.4 meters
   const hasArrived = Boolean(activeTarget && liveDirectDistance < 1.4);
 
-  // Pulse animation frame
+  const filteredPeers = useMemo(() => {
+    const q = directorySearch.trim().toLowerCase();
+    if (!q) return peers;
+    return peers.filter(
+      (p) =>
+        p.fullName.toLowerCase().includes(q) ||
+        p.department.toLowerCase().includes(q) ||
+        p.role.toLowerCase().includes(q)
+    );
+  }, [peers, directorySearch]);
+
+  const filteredRooms = useMemo(() => {
+    const q = directorySearch.trim().toLowerCase();
+    if (!q) return roomDestinations;
+    return roomDestinations.filter((r) => r.label.toLowerCase().includes(q));
+  }, [roomDestinations, directorySearch]);
+
   useEffect(() => {
     let frame: number;
     const tick = () => {
-      setPulseAnim((prev) => (prev + 0.02) % 1);
+      setPulseAnim((prev) => (prev + 0.016) % 1);
       frame = requestAnimationFrame(tick);
     };
     frame = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(frame);
   }, []);
 
-  // WebSockets Peer Position Lock: Peer natural roaming updates target coords in real time
   useEffect(() => {
     const interval = setInterval(() => {
       setPeers((prev) =>
         prev.map((peer, idx) => {
           const angle = Date.now() / 1400 + idx * 1.5;
           const bases = [
-            { x: 25.0, y: 19.5 }, // Hassaan
-            { x: 7.0, y: 6.5 },   // Sarah
-            { x: 25.0, y: 6.5 },  // Marcus
-            { x: 7.0, y: 19.5 },  // Elena
+            { x: 25.0, y: 19.5 },
+            { x: 7.0, y: 6.5 },
+            { x: 25.0, y: 6.5 },
+            { x: 7.0, y: 19.5 },
           ];
           const b = bases[idx] || { x: peer.x, y: peer.y };
           return {
@@ -276,9 +454,6 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
     return () => clearInterval(interval);
   }, []);
 
-
-
-  // Low-latency orientation extraction with screen-orientation & compass calibration offset
   const handleOrientation = useCallback((e: DeviceOrientationEvent) => {
     const compass = (e as unknown as { webkitCompassHeading?: number }).webkitCompassHeading;
     const screenAngle =
@@ -300,7 +475,6 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
     const smoothed = smoothHeadingDegrees(headingRef.current, calibrated, 0.48);
     headingRef.current = smoothed;
 
-    // Throttle React UI updates (~25fps & >=2 deg change) so A* and Canvas stay 100% lag-free
     const now = Date.now();
     if (now - lastHeadingSyncRef.current >= 40) {
       lastHeadingSyncRef.current = now;
@@ -311,7 +485,6 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
     }
   }, []);
 
-  // Anti-Shake Gait Step Detector (ignores sitting hand-shakes, fires immediately on real strides)
   const handleMotion = useCallback(
     (e: DeviceMotionEvent) => {
       const accG = e.accelerationIncludingGravity;
@@ -343,23 +516,22 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
           window.clearTimeout(shakeHintTimerRef.current);
         }
         shakeHintTimerRef.current = window.setTimeout(() => {
-          setSensorStatusMessage('PDR Active');
+          setSensorStatusMessage('Motion Active');
         }, 900);
       }
     },
     [stepForward]
   );
 
-  // Align physical phone direction to Map North (0 deg) on tap
   const alignPhoneHeadingToMap = useCallback(() => {
     if (rawHeadingRef.current !== null) {
       headingOffsetRef.current = rawHeadingRef.current;
     }
     headingRef.current = 0;
     setUserPose((prev) => ({ ...prev, heading: 0 }));
-    setSensorStatusMessage('Heading Aligned');
+    setSensorStatusMessage('Aligned');
     window.setTimeout(() => {
-      setSensorStatusMessage((cur) => (cur === 'Heading Aligned' ? 'PDR Active' : cur));
+      setSensorStatusMessage((cur) => (cur === 'Aligned' ? 'Motion Active' : cur));
     }, 1100);
   }, []);
 
@@ -396,13 +568,11 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
     };
 
     setMotionSensorsActive(true);
-    setSensorStatusMessage('PDR Active');
+    setSensorStatusMessage('Motion Active');
   }, [handleOrientation, handleMotion]);
 
-  // Real Hardware Device Motion & Accelerometer Step Detector Handler
   const requestSensorAccess = async () => {
     try {
-      // iOS 13+ requires explicit permission request
       if (
         typeof (DeviceOrientationEvent as unknown as { requestPermission?: () => Promise<string> })
           .requestPermission === 'function'
@@ -411,7 +581,7 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
           DeviceOrientationEvent as unknown as { requestPermission: () => Promise<string> }
         ).requestPermission();
         if (perm !== 'granted') {
-          setSensorStatusMessage('Motion Permission Denied');
+          setSensorStatusMessage('Permission Denied');
           return;
         }
       }
@@ -430,7 +600,6 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
     }
   };
 
-  // Auto-start motion sensors on Android/browsers that don't gate behind iOS requestPermission
   useEffect(() => {
     const needsExplicitPrompt =
       typeof (DeviceMotionEvent as unknown as { requestPermission?: () => Promise<string> })
@@ -452,123 +621,190 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
     };
   }, [attachMotionListeners]);
 
-  // Clean Canvas Painter
+  // Full-Viewport HiDPI Enterprise Spatial Map Painter
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    const width = canvas.width;
-    const height = canvas.height;
+    const { width: viewW, height: viewH } = viewportSize;
+    if (viewW <= 0 || viewH <= 0) return;
 
-    // 1. Dark Slate Viewport Background (#0F172A)
-    ctx.fillStyle = '#0F172A';
-    ctx.fillRect(0, 0, width, height);
-
-    // Subtle Architectural Grid
-    ctx.strokeStyle = '#1E293B';
-    ctx.lineWidth = 1;
-    for (let x = 0; x < width; x += METERS_TO_PX * 2) {
-      ctx.beginPath();
-      ctx.moveTo(x, 0);
-      ctx.lineTo(x, height);
-      ctx.stroke();
-    }
-    for (let y = 0; y < height; y += METERS_TO_PX * 2) {
-      ctx.beginPath();
-      ctx.moveTo(0, y);
-      ctx.lineTo(width, y);
-      ctx.stroke();
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const backingW = Math.round(viewW * dpr);
+    const backingH = Math.round(viewH * dpr);
+    if (canvas.width !== backingW || canvas.height !== backingH) {
+      canvas.width = backingW;
+      canvas.height = backingH;
     }
 
-    // 2. Clean Room Layout with Solid Wall Segments & Visible Open Doorways
+    ctx.save();
+    ctx.scale(dpr, dpr);
+
+    // 1. Deep Obsidian-Graphite Map Background
+    ctx.fillStyle = '#0B0F17';
+    ctx.fillRect(0, 0, viewW, viewH);
+
+    // Subtle structural dot grid aligned to camera
+    const { scale, panX, panY } = camera;
+    const stepPx = scale * 2;
+    if (stepPx >= 16) {
+      ctx.fillStyle = 'rgba(148, 163, 184, 0.14)';
+      const startX = ((panX % stepPx) + stepPx) % stepPx;
+      const startY = ((panY % stepPx) + stepPx) % stepPx;
+      for (let gx = startX; gx < viewW; gx += stepPx) {
+        for (let gy = startY; gy < viewH; gy += stepPx) {
+          ctx.fillRect(gx - 0.75, gy - 0.75, 1.5, 1.5);
+        }
+      }
+    }
+
+    // Helper: World meters -> Screen px
+    const wx = (mx: number) => panX + mx * scale;
+    const wy = (my: number) => panY + my * scale;
+
+    // 2. Building Floor Slab (Corridors & Walkways)
+    const bx = wx(WORLD_BOUNDS.minX);
+    const by = wy(WORLD_BOUNDS.minY);
+    const bw = WORLD_BOUNDS.width * scale;
+    const bh = WORLD_BOUNDS.height * scale;
+
+    ctx.fillStyle = '#121826';
+    ctx.beginPath();
+    ctx.roundRect(bx, by, bw, bh, Math.max(4, scale * 0.28));
+    ctx.fill();
+
+    // 3. Rooms, Doorways & Architectural Labels
     FLOOR_ROOMS.forEach((r) => {
-      const rx = r.x * METERS_TO_PX;
-      const ry = r.y * METERS_TO_PX;
-      const rw = r.w * METERS_TO_PX;
-      const rh = r.h * METERS_TO_PX;
+      const rx = wx(r.x);
+      const ry = wy(r.y);
+      const rw = r.w * scale;
+      const rh = r.h * scale;
+      const isRoomTarget = targetRoomId === r.id;
 
-      ctx.fillStyle = '#1E293B70';
+      ctx.fillStyle = isRoomTarget
+        ? 'rgba(56, 189, 248, 0.16)'
+        : r.id === 'corr_center'
+          ? '#161F33'
+          : '#1A2336';
       ctx.beginPath();
-      ctx.roundRect(rx, ry, rw, rh, 8);
+      ctx.roundRect(rx, ry, rw, rh, Math.max(3, scale * 0.2));
       ctx.fill();
 
-      // Draw subtle doorway thresholds so open entrances are clear
-      ctx.strokeStyle = 'rgba(6, 182, 212, 0.32)';
-      ctx.lineWidth = 2;
+      if (isRoomTarget) {
+        ctx.strokeStyle = 'rgba(56, 189, 248, 0.55)';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+      }
+
+      // Doorway threshold openings
+      ctx.strokeStyle = 'rgba(56, 189, 248, 0.45)';
+      ctx.lineWidth = Math.max(1.5, scale * 0.07);
       ctx.setLineDash([4, 4]);
       r.doors.forEach((d) => {
         ctx.beginPath();
         if (d.side === 'top') {
-          ctx.moveTo((r.x + d.start) * METERS_TO_PX, ry);
-          ctx.lineTo((r.x + d.end) * METERS_TO_PX, ry);
+          ctx.moveTo(wx(r.x + d.start), ry);
+          ctx.lineTo(wx(r.x + d.end), ry);
         } else if (d.side === 'bottom') {
-          ctx.moveTo((r.x + d.start) * METERS_TO_PX, ry + rh);
-          ctx.lineTo((r.x + d.end) * METERS_TO_PX, ry + rh);
+          ctx.moveTo(wx(r.x + d.start), ry + rh);
+          ctx.lineTo(wx(r.x + d.end), ry + rh);
         } else if (d.side === 'left') {
-          ctx.moveTo(rx, (r.y + d.start) * METERS_TO_PX);
-          ctx.lineTo(rx, (r.y + d.end) * METERS_TO_PX);
+          ctx.moveTo(rx, wy(r.y + d.start));
+          ctx.lineTo(rx, wy(r.y + d.end));
         } else {
-          ctx.moveTo(rx + rw, (r.y + d.start) * METERS_TO_PX);
-          ctx.lineTo(rx + rw, (r.y + d.end) * METERS_TO_PX);
+          ctx.moveTo(rx + rw, wy(r.y + d.start));
+          ctx.lineTo(rx + rw, wy(r.y + d.end));
         }
         ctx.stroke();
       });
       ctx.setLineDash([]);
 
-      ctx.fillStyle = '#94A3B8';
-      ctx.font = '500 12px Inter, sans-serif';
-      ctx.fillText(r.name, rx + 16, ry + 24);
+      // Room Typography (scales gracefully on phone vs desktop)
+      const labelFontSize = Math.max(10, Math.min(13.5, scale * 0.44));
+      const codeFontSize = Math.max(8.5, Math.min(10.5, scale * 0.34));
+      const labelPadX = Math.max(8, scale * 0.45);
+      const labelPadY = Math.max(16, scale * 0.85);
+
+      ctx.fillStyle = isRoomTarget ? '#7DD3FC' : '#CBD5E1';
+      ctx.font = `600 ${labelFontSize}px "Plus Jakarta Sans", system-ui, sans-serif`;
+      ctx.fillText(r.name, rx + labelPadX, ry + labelPadY);
+
+      const code = ROOM_CODES[r.id];
+      if (code && scale >= 14) {
+        ctx.fillStyle = '#64748B';
+        ctx.font = `500 ${codeFontSize}px "JetBrains Mono", monospace`;
+        ctx.fillText(code, rx + labelPadX, ry + labelPadY + codeFontSize + 5);
+      }
     });
 
-    // Solid impenetrable wall segments (skip outer frame edges that sit at map boundary)
-    ctx.strokeStyle = '#475569';
-    ctx.lineWidth = 2.5;
+    // 4. Solid Structural Walls
+    ctx.strokeStyle = '#3B4D6B';
+    ctx.lineWidth = Math.max(2, scale * 0.11);
     ctx.lineCap = 'round';
     FLOOR_WALL_SEGMENTS.forEach((w) => {
       ctx.beginPath();
-      ctx.moveTo(w.x1 * METERS_TO_PX, w.y1 * METERS_TO_PX);
-      ctx.lineTo(w.x2 * METERS_TO_PX, w.y2 * METERS_TO_PX);
+      ctx.moveTo(wx(w.x1), wy(w.y1));
+      ctx.lineTo(wx(w.x2), wy(w.y2));
       ctx.stroke();
     });
 
-    // 3. Smooth Glowing Cyan Dashed Route Line connecting Start to Target
+    // 5. Crisp Sky-Cyan Wayfinding Path
     if (activeRoute && activeRoute.pathCoordinates.length > 1) {
       const coords = activeRoute.pathCoordinates;
 
-      ctx.strokeStyle = 'rgba(6, 182, 212, 0.28)';
-      ctx.lineWidth = 10;
+      ctx.strokeStyle = 'rgba(56, 189, 248, 0.22)';
+      ctx.lineWidth = Math.max(7, scale * 0.36);
       ctx.lineCap = 'round';
       ctx.lineJoin = 'round';
       ctx.beginPath();
-      ctx.moveTo(coords[0].x * METERS_TO_PX, coords[0].y * METERS_TO_PX);
-      coords.forEach((c) => ctx.lineTo(c.x * METERS_TO_PX, c.y * METERS_TO_PX));
+      ctx.moveTo(wx(coords[0].x), wy(coords[0].y));
+      coords.forEach((c) => ctx.lineTo(wx(c.x), wy(c.y)));
       ctx.stroke();
 
-      ctx.strokeStyle = '#06B6D4';
-      ctx.lineWidth = 3.5;
-      ctx.setLineDash([8, 6]);
-      ctx.lineDashOffset = -pulseAnim * 28;
+      ctx.strokeStyle = '#38BDF8';
+      ctx.lineWidth = Math.max(2.5, scale * 0.12);
+      ctx.setLineDash([7, 5]);
+      ctx.lineDashOffset = -pulseAnim * 24;
       ctx.beginPath();
-      ctx.moveTo(coords[0].x * METERS_TO_PX, coords[0].y * METERS_TO_PX);
-      coords.forEach((c) => ctx.lineTo(c.x * METERS_TO_PX, c.y * METERS_TO_PX));
+      ctx.moveTo(wx(coords[0].x), wy(coords[0].y));
+      coords.forEach((c) => ctx.lineTo(wx(c.x), wy(c.y)));
       ctx.stroke();
       ctx.setLineDash([]);
     }
 
-    // 4. Building Peers
+    // Room target pin if navigating to a room
+    if (targetRoomId && activeTarget && !activeTarget.isPeer) {
+      const tx = wx(activeTarget.coords.x);
+      const ty = wy(activeTarget.coords.y);
+
+      ctx.strokeStyle = `rgba(56, 189, 248, ${0.8 * (1 - pulseAnim)})`;
+      ctx.lineWidth = 2.5;
+      ctx.beginPath();
+      ctx.arc(tx, ty, 9 + pulseAnim * 20, 0, Math.PI * 2);
+      ctx.stroke();
+
+      ctx.fillStyle = '#38BDF8';
+      ctx.beginPath();
+      ctx.arc(tx, ty, 7, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = '#FFFFFF';
+      ctx.lineWidth = 2.5;
+      ctx.stroke();
+    }
+
+    // 6. Building Peers
     peers.forEach((peer) => {
-      const px = peer.x * METERS_TO_PX;
-      const py = peer.y * METERS_TO_PX;
+      const px = wx(peer.x);
+      const py = wy(peer.y);
       const isTarget = targetPeerId === peer.id;
 
       if (isTarget) {
-        // Glowing / Pulsing Yellow Target Dot
         ctx.strokeStyle = `rgba(245, 158, 11, ${0.85 * (1 - pulseAnim)})`;
-        ctx.lineWidth = 3;
+        ctx.lineWidth = 2.5;
         ctx.beginPath();
-        ctx.arc(px, py, 10 + pulseAnim * 22, 0, Math.PI * 2);
+        ctx.arc(px, py, 9 + pulseAnim * 22, 0, Math.PI * 2);
         ctx.stroke();
 
         ctx.fillStyle = '#F59E0B';
@@ -579,37 +815,56 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
         ctx.lineWidth = 2.5;
         ctx.stroke();
 
-        ctx.fillStyle = '#FEF08A';
-        ctx.font = 'bold 11px Inter, sans-serif';
-        ctx.fillText(`⭐ ${peer.fullName}`, px - 28, py - 14);
+        const labelText = peer.fullName;
+        ctx.font = '600 11px "Plus Jakarta Sans", system-ui, sans-serif';
+        const textWidth = ctx.measureText(labelText).width;
+        const boxW = textWidth + 14;
+        const boxH = 22;
+        const boxX = Math.max(10, Math.min(viewW - boxW - 10, px - boxW / 2));
+        const boxY = Math.max(10, py - 34);
+
+        ctx.fillStyle = 'rgba(17, 22, 34, 0.94)';
+        ctx.beginPath();
+        ctx.roundRect(boxX, boxY, boxW, boxH, 6);
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(245, 158, 11, 0.6)';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+
+        ctx.fillStyle = '#FDE68A';
+        ctx.fillText(labelText, boxX + 7, boxY + 14.5);
       } else {
-        // Subtle Muted Dots for other users
         ctx.fillStyle = '#64748B';
         ctx.beginPath();
-        ctx.arc(px, py, 6, 0, Math.PI * 2);
+        ctx.arc(px, py, 5.5, 0, Math.PI * 2);
         ctx.fill();
-        ctx.strokeStyle = '#334155';
-        ctx.lineWidth = 1.5;
+        ctx.strokeStyle = '#0B0F17';
+        ctx.lineWidth = 2;
         ctx.stroke();
 
         ctx.fillStyle = '#94A3B8';
-        ctx.font = '10px Inter, sans-serif';
-        ctx.fillText(peer.fullName.split(' ')[0], px - 12, py - 10);
+        ctx.font = '500 10.5px "Plus Jakarta Sans", system-ui, sans-serif';
+        const first = peer.fullName.split(' ')[0];
+        const w = ctx.measureText(first).width;
+        ctx.fillText(first, px - w / 2, py - 10);
       }
     });
 
-    // 5. User Dot: Pulsing Blue Dot with Heading Direction Cone
-    const ux = userPose.x * METERS_TO_PX;
-    const uy = userPose.y * METERS_TO_PX;
+    // 7. Current User Position Beacon & Heading Cone
+    const ux = wx(userPose.x);
+    const uy = wy(userPose.y);
 
-    ctx.fillStyle = 'rgba(59, 130, 246, 0.12)';
+    ctx.fillStyle = 'rgba(59, 130, 246, 0.1)';
     ctx.beginPath();
-    ctx.arc(ux, uy, userPose.accuracy * METERS_TO_PX, 0, Math.PI * 2);
+    ctx.arc(ux, uy, userPose.accuracy * scale, 0, Math.PI * 2);
     ctx.fill();
 
     const headingRad = ((userPose.heading - 90) * Math.PI) / 180;
-    const coneRadius = 42;
-    ctx.fillStyle = 'rgba(59, 130, 246, 0.35)';
+    const coneRadius = Math.max(36, scale * 1.65);
+    const coneGrad = ctx.createRadialGradient(ux, uy, 4, ux, uy, coneRadius);
+    coneGrad.addColorStop(0, 'rgba(59, 130, 246, 0.42)');
+    coneGrad.addColorStop(1, 'rgba(59, 130, 246, 0.02)');
+    ctx.fillStyle = coneGrad;
     ctx.beginPath();
     ctx.moveTo(ux, uy);
     ctx.arc(ux, uy, coneRadius, headingRad - 0.42, headingRad + 0.42);
@@ -620,10 +875,10 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
 
     ctx.strokeStyle = isWallBlocked
       ? 'rgba(244, 63, 94, 0.9)'
-      : `rgba(59, 130, 246, ${0.9 * (1 - pulseAnim)})`;
+      : `rgba(59, 130, 246, ${0.85 * (1 - pulseAnim)})`;
     ctx.lineWidth = 2.5;
     ctx.beginPath();
-    ctx.arc(ux, uy, 10 + pulseAnim * 20, 0, Math.PI * 2);
+    ctx.arc(ux, uy, 9 + pulseAnim * 20, 0, Math.PI * 2);
     ctx.stroke();
 
     ctx.fillStyle = isWallBlocked ? '#F43F5E' : '#3B82F6';
@@ -633,277 +888,751 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
     ctx.strokeStyle = '#FFFFFF';
     ctx.lineWidth = 2.5;
     ctx.stroke();
-  }, [userPose, activeRoute, peers, targetPeerId, pulseAnim]);
 
-  // Handle canvas click: select target peer or room only (no manual movement)
-  const handleCanvasClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const rect = canvas.getBoundingClientRect();
-    const clickX = (e.clientX - rect.left) * (canvas.width / rect.width);
-    const clickY = (e.clientY - rect.top) * (canvas.height / rect.height);
-    const meterX = clickX / METERS_TO_PX;
-    const meterY = clickY / METERS_TO_PX;
-
-    // Check if clicked a peer
-    const clickedPeer = peers.find((p) => Math.hypot(p.x - meterX, p.y - meterY) < 1.8);
-    if (clickedPeer) {
-      setTargetPeerId(clickedPeer.id);
-      setTargetRoomId(null);
-      return;
+    // 8. Architectural 5m Scale Bar (bottom-left)
+    const scaleX = 16;
+    const scaleY = viewH - 16;
+    const scaleLen = 5 * scale;
+    if (scaleLen <= viewW * 0.45) {
+      ctx.strokeStyle = 'rgba(148, 163, 184, 0.55)';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(scaleX, scaleY - 4);
+      ctx.lineTo(scaleX, scaleY);
+      ctx.lineTo(scaleX + scaleLen, scaleY);
+      ctx.lineTo(scaleX + scaleLen, scaleY - 4);
+      ctx.stroke();
+      ctx.fillStyle = '#64748B';
+      ctx.font = '500 10px "JetBrains Mono", monospace';
+      ctx.fillText('5 m', scaleX + scaleLen + 6, scaleY + 1);
     }
 
-    // Check if clicked a room
-    const clickedRoom = nodes.find((n) => Math.hypot(n.x - meterX, n.y - meterY) < 2.5 && n.type === 'room');
-    if (clickedRoom) {
-      setTargetRoomId(clickedRoom.id);
-      setTargetPeerId(null);
+    ctx.restore();
+  }, [
+    viewportSize,
+    camera,
+    userPose,
+    activeRoute,
+    peers,
+    targetPeerId,
+    targetRoomId,
+    activeTarget,
+    pulseAnim,
+  ]);
+
+  // Select peer or room from canvas screen tap coordinates
+  const selectMapTargetAtClientPoint = useCallback(
+    (clientX: number, clientY: number) => {
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+      const rect = canvas.getBoundingClientRect();
+      const screenX = clientX - rect.left;
+      const screenY = clientY - rect.top;
+      const meterX = (screenX - camera.panX) / camera.scale;
+      const meterY = (screenY - camera.panY) / camera.scale;
+
+      const clickedPeer = peers.find((p) => Math.hypot(p.x - meterX, p.y - meterY) < 1.8);
+      if (clickedPeer) {
+        setTargetPeerId(clickedPeer.id);
+        setTargetRoomId(null);
+        return;
+      }
+
+      const clickedRoom = nodes.find(
+        (n) => Math.hypot(n.x - meterX, n.y - meterY) < 3.0 && n.type === 'room'
+      );
+      if (clickedRoom) {
+        setTargetRoomId(clickedRoom.id);
+        setTargetPeerId(null);
+      }
+    },
+    [camera, peers, nodes]
+  );
+
+  // Mouse pan & click handlers
+  const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    pointerStateRef.current.isDragging = true;
+    pointerStateRef.current.movedPx = 0;
+    pointerStateRef.current.startX = e.clientX;
+    pointerStateRef.current.startY = e.clientY;
+    pointerStateRef.current.origPanX = camera.panX;
+    pointerStateRef.current.origPanY = camera.panY;
+  };
+
+  const handleMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    const st = pointerStateRef.current;
+    if (!st.isDragging) return;
+    const dx = e.clientX - st.startX;
+    const dy = e.clientY - st.startY;
+    st.movedPx = Math.max(st.movedPx, Math.hypot(dx, dy));
+    setCamera((prev) => ({
+      ...prev,
+      panX: st.origPanX + dx,
+      panY: st.origPanY + dy,
+    }));
+  };
+
+  const handleMouseUp = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    const st = pointerStateRef.current;
+    if (!st.isDragging) return;
+    st.isDragging = false;
+    if (st.movedPx < 6) {
+      selectMapTargetAtClientPoint(e.clientX, e.clientY);
     }
   };
 
-  return (
-    <div className="h-screen w-full bg-[#0B0F19] text-slate-100 flex flex-col font-sans select-none overflow-hidden">
-      {/* 1. Minimalist Top Navigation Bar */}
-      <header className="h-16 px-6 bg-[#0F172A]/90 border-b border-slate-800/80 backdrop-blur-md flex items-center justify-between shrink-0 z-30">
-        <div className="flex items-center gap-3">
-          <div className="w-9 h-9 rounded-xl bg-gradient-to-tr from-cyan-500 to-blue-600 p-0.5 shadow-md shadow-cyan-500/20">
-            <div className="w-full h-full bg-[#0F172A] rounded-[10px] flex items-center justify-center">
-              <Compass className="w-5 h-5 text-cyan-400" />
-            </div>
-          </div>
-          <div>
-            <h1 className="text-base font-bold text-white tracking-tight leading-none">
-              Indoor Nav Engine
-            </h1>
-            <div className="flex items-center gap-2 mt-1">
-              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-              <span className="text-[11px] text-slate-400 font-medium">Connected to Floor 1</span>
-            </div>
-          </div>
-        </div>
+  const handleWheel = (e: React.WheelEvent<HTMLCanvasElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const fx = e.clientX - rect.left;
+    const fy = e.clientY - rect.top;
+    const factor = e.deltaY < 0 ? 1.12 : 0.89;
+    zoomBy(factor, fx, fy);
+  };
 
-        {/* Center: Current User Profile Chip & Sensor Status */}
-        <div className="flex items-center gap-2">
-          <div className="hidden sm:flex items-center gap-2.5 px-3.5 py-1.5 rounded-full bg-slate-800/60 border border-slate-700/60 text-xs">
-            <div className="w-6 h-6 rounded-full bg-cyan-500 text-slate-950 font-bold flex items-center justify-center text-[11px]">
-              {(currentUser.name.trim()[0] || 'U').toUpperCase()}
-            </div>
-            <span className="font-semibold text-white">
-              Good morning, {currentUser.name.trim().split(/\s+/)[0] || 'there'}
-            </span>
-            <span className="text-slate-400">•</span>
-            <span className="text-cyan-400 font-medium">{currentUser.role}</span>
-          </div>
+  // Touch single-finger pan + two-finger pinch zoom handlers
+  const handleTouchStart = (e: React.TouchEvent<HTMLCanvasElement>) => {
+    const st = pointerStateRef.current;
+    if (e.touches.length === 1) {
+      const t = e.touches[0];
+      st.isDragging = true;
+      st.pinchDist = null;
+      st.movedPx = 0;
+      st.startX = t.clientX;
+      st.startY = t.clientY;
+      st.origPanX = camera.panX;
+      st.origPanY = camera.panY;
+    } else if (e.touches.length === 2) {
+      const [t1, t2] = [e.touches[0], e.touches[1]];
+      const rect = e.currentTarget.getBoundingClientRect();
+      st.isDragging = false;
+      st.movedPx = 999;
+      st.pinchDist = Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
+      st.pinchMidX = (t1.clientX + t2.clientX) / 2 - rect.left;
+      st.pinchMidY = (t1.clientY + t2.clientY) / 2 - rect.top;
+      st.origScale = camera.scale;
+      st.origPanX = camera.panX;
+      st.origPanY = camera.panY;
+    }
+  };
 
-          {/* Sensor Access & Heading Alignment */}
-          <button
-            onClick={requestSensorAccess}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium border transition ${
-              motionSensorsActive
-                ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
-                : 'bg-slate-800 hover:bg-slate-700 text-slate-300 border-slate-700'
-            }`}
-            title="Enable anti-shake walking step detection & compass heading"
-          >
-            <Smartphone className="w-3.5 h-3.5" />
-            <span className="hidden md:inline">{sensorStatusMessage}</span>
-          </button>
+  const handleTouchMove = (e: React.TouchEvent<HTMLCanvasElement>) => {
+    const st = pointerStateRef.current;
+    if (e.touches.length === 1 && st.isDragging) {
+      const t = e.touches[0];
+      const dx = t.clientX - st.startX;
+      const dy = t.clientY - st.startY;
+      st.movedPx = Math.max(st.movedPx, Math.hypot(dx, dy));
+      setCamera((prev) => ({
+        ...prev,
+        panX: st.origPanX + dx,
+        panY: st.origPanY + dy,
+      }));
+    } else if (e.touches.length === 2 && st.pinchDist && st.pinchDist > 0) {
+      const [t1, t2] = [e.touches[0], e.touches[1]];
+      const nextDist = Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
+      const ratio = nextDist / st.pinchDist;
+      const nextScale = Math.max(10, Math.min(72, st.origScale * ratio));
+      const worldX = (st.pinchMidX - st.origPanX) / st.origScale;
+      const worldY = (st.pinchMidY - st.origPanY) / st.origScale;
+      setCamera({
+        scale: nextScale,
+        panX: st.pinchMidX - worldX * nextScale,
+        panY: st.pinchMidY - worldY * nextScale,
+      });
+    }
+  };
 
-          {motionSensorsActive && (
-            <button
-              onClick={alignPhoneHeadingToMap}
-              className="flex items-center gap-1 px-2.5 py-1.5 rounded-full text-xs font-medium bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 transition"
-              title="Point your phone toward the top of the map and tap Align"
-            >
-              <Compass className="w-3.5 h-3.5" />
-              <span>Align</span>
-            </button>
-          )}
-        </div>
+  const handleTouchEnd = (e: React.TouchEvent<HTMLCanvasElement>) => {
+    const st = pointerStateRef.current;
+    if (e.touches.length === 0) {
+      if (st.isDragging && st.movedPx < 8 && e.changedTouches[0]) {
+        selectMapTargetAtClientPoint(e.changedTouches[0].clientX, e.changedTouches[0].clientY);
+      }
+      st.isDragging = false;
+      st.pinchDist = null;
+    }
+  };
 
-        {/* Right: Actions */}
-        <div className="flex items-center gap-2.5">
-          <button
-            onClick={() => setIsDrawerOpen(true)}
-            className="flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-semibold bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-400 border border-cyan-500/30 transition shadow-sm"
-          >
-            <Users className="w-4 h-4" />
-            <span>Active Users</span>
-            <span className="px-1.5 py-0.2 rounded-full bg-cyan-400 text-slate-950 text-[10px] font-bold">
-              {peers.length}
-            </span>
-          </button>
+  const firstName = currentUser.name.trim().split(/\s+/)[0] || 'Navigator';
 
-          <button
-            onClick={onSignOut}
-            className="p-2 rounded-xl text-slate-400 hover:text-white hover:bg-slate-800/80 transition"
-            title="Sign Out"
-            aria-label="Sign out"
-          >
-            <LogOut className="w-4 h-4" />
-          </button>
-        </div>
-      </header>
-
-      {/* 2. Clean 2D Floor Plan Canvas (Main Viewport) */}
-      <main className="flex-1 relative p-4 flex items-center justify-center bg-[#070B14] overflow-hidden">
-        <div className="relative w-full h-full max-w-5xl rounded-3xl overflow-hidden border border-slate-800 bg-[#0F172A] shadow-2xl flex items-center justify-center">
-          <canvas
-            ref={canvasRef}
-            width={768}
-            height={580}
-            onClick={handleCanvasClick}
-            className="cursor-pointer block max-w-full max-h-full object-contain"
+  // Reusable Directory List Content (shared between Desktop Left Sidebar & Mobile Bottom Sheet)
+  const renderDirectoryList = (isMobileSheet: boolean) => (
+    <>
+      <div className="space-y-3">
+        <div className="relative">
+          <Search
+            className="w-4 h-4 text-slate-500 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none"
+            aria-hidden="true"
           />
+          <input
+            type="text"
+            value={directorySearch}
+            onChange={(e) => setDirectorySearch(e.target.value)}
+            placeholder="Search people or rooms..."
+            aria-label="Search people or rooms"
+            className="w-full min-h-[42px] bg-[#0D121D] border border-white/[0.08] focus:border-sky-400 rounded-xl pl-10 pr-3.5 py-2 text-xs text-white placeholder:text-slate-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
+          />
+        </div>
 
-          {/* 3. Floating Navigation Guidance Banner with Live Distance Countdown */}
-          {activeTarget && (
-            <div className="absolute top-4 left-4 right-4 sm:left-auto sm:right-auto sm:w-[500px] z-20 animate-fade-in">
-              <div
-                className={`border rounded-2xl p-4 shadow-2xl backdrop-blur-xl flex items-center justify-between gap-3 transition-all ${
-                  hasArrived
-                    ? 'bg-emerald-950/95 border-emerald-500/60 shadow-emerald-500/20'
-                    : 'bg-[#0B101E]/95 border-cyan-500/40 shadow-black/50'
+        <div
+          role="tablist"
+          aria-label="Directory category"
+          className="grid grid-cols-2 p-1 rounded-xl bg-[#0D121D] border border-white/[0.08]"
+        >
+          <button
+            type="button"
+            role="tab"
+            aria-selected={directoryTab === 'people'}
+            onClick={() => setDirectoryTab('people')}
+            className={`min-h-[38px] rounded-lg text-xs font-semibold transition-colors ${
+              directoryTab === 'people'
+                ? 'bg-sky-400 text-slate-950'
+                : 'text-slate-400 hover:text-white'
+            }`}
+          >
+            People ({peers.length})
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={directoryTab === 'rooms'}
+            onClick={() => setDirectoryTab('rooms')}
+            className={`min-h-[38px] rounded-lg text-xs font-semibold transition-colors ${
+              directoryTab === 'rooms'
+                ? 'bg-sky-400 text-slate-950'
+                : 'text-slate-400 hover:text-white'
+            }`}
+          >
+            Rooms ({roomDestinations.length})
+          </button>
+        </div>
+      </div>
+
+      <div className="flex-1 overflow-y-auto pt-3 space-y-2">
+        {directoryTab === 'people' ? (
+          filteredPeers.length === 0 ? (
+            <p className="text-xs text-slate-500 text-center py-8">
+              No matching building users found.
+            </p>
+          ) : (
+            filteredPeers.map((peer) => {
+              const distance = Math.hypot(peer.x - userPose.x, peer.y - userPose.y);
+              const isTarget = targetPeerId === peer.id;
+
+              return (
+                <button
+                  key={peer.id}
+                  type="button"
+                  onClick={() => {
+                    if (isTarget) {
+                      setTargetPeerId(null);
+                    } else {
+                      setTargetPeerId(peer.id);
+                      setTargetRoomId(null);
+                    }
+                    if (isMobileSheet) setIsMobileSheetOpen(false);
+                  }}
+                  className={`w-full text-left p-3 rounded-xl border transition-colors flex items-center justify-between gap-3 min-h-[60px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 ${
+                    isTarget
+                      ? 'bg-amber-500/12 border-amber-400/50'
+                      : 'bg-[#0D121D] border-white/[0.06] hover:border-white/[0.16] hover:bg-[#141B2B]'
+                  }`}
+                >
+                  <div className="flex items-center gap-3 min-w-0">
+                    <div
+                      className="w-9 h-9 rounded-lg flex items-center justify-center font-bold text-xs shrink-0"
+                      style={{
+                        backgroundColor: `${peer.avatarColor}20`,
+                        color: peer.avatarColor,
+                        border: `1px solid ${peer.avatarColor}45`,
+                      }}
+                    >
+                      {peer.fullName[0]}
+                    </div>
+                    <div className="min-w-0">
+                      <div className="font-semibold text-white text-sm truncate">
+                        {peer.fullName}
+                      </div>
+                      <div className="text-xs text-slate-400 truncate">
+                        {peer.department} <span aria-hidden="true">·</span> {peer.role}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="text-right shrink-0">
+                    <div
+                      className={`text-xs font-mono tabular-nums font-semibold ${
+                        isTarget ? 'text-amber-300' : 'text-sky-400'
+                      }`}
+                    >
+                      {distance.toFixed(1)} m
+                    </div>
+                    <div className="text-[11px] font-medium text-slate-400 mt-0.5">
+                      {isTarget ? 'Routing' : 'Route'}
+                    </div>
+                  </div>
+                </button>
+              );
+            })
+          )
+        ) : filteredRooms.length === 0 ? (
+          <p className="text-xs text-slate-500 text-center py-8">No matching rooms found.</p>
+        ) : (
+          filteredRooms.map((room) => {
+            const distance = Math.hypot(room.x - userPose.x, room.y - userPose.y);
+            const isTarget = targetRoomId === room.id;
+
+            return (
+              <button
+                key={room.id}
+                type="button"
+                onClick={() => {
+                  if (isTarget) {
+                    setTargetRoomId(null);
+                  } else {
+                    setTargetRoomId(room.id);
+                    setTargetPeerId(null);
+                  }
+                  if (isMobileSheet) setIsMobileSheetOpen(false);
+                }}
+                className={`w-full text-left p-3 rounded-xl border transition-colors flex items-center justify-between gap-3 min-h-[60px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 ${
+                  isTarget
+                    ? 'bg-sky-400/12 border-sky-400/50'
+                    : 'bg-[#0D121D] border-white/[0.06] hover:border-white/[0.16] hover:bg-[#141B2B]'
                 }`}
               >
                 <div className="flex items-center gap-3 min-w-0">
-                  <div
-                    className={`w-11 h-11 rounded-xl flex items-center justify-center shrink-0 ${
-                      hasArrived
-                        ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/40'
-                        : 'bg-cyan-500/15 text-cyan-400 border border-cyan-500/30'
-                    }`}
-                  >
-                    {hasArrived ? (
-                      <CheckCircle2 className="w-6 h-6 animate-bounce" />
-                    ) : (
-                      <Navigation className="w-5 h-5 animate-pulse" />
-                    )}
+                  <div className="w-9 h-9 rounded-lg bg-[#161F33] border border-white/[0.08] flex items-center justify-center text-sky-400 shrink-0">
+                    <MapPin className="w-4 h-4" aria-hidden="true" />
                   </div>
                   <div className="min-w-0">
-                    <div className="text-xs text-slate-400 flex items-center gap-1.5">
-                      <span>{hasArrived ? 'Destination Reached' : 'Navigating to'}</span>
-                      <span className="text-cyan-400 font-bold truncate">{activeTarget.name}</span>
-                    </div>
-
-                    <div className="text-sm font-bold text-white truncate">
-                      {hasArrived
-                        ? 'You Have Arrived! 🎉'
-                        : `Proceed ${remainingDistanceMeters.toFixed(1)}m to destination`}
-                    </div>
-
-                    <div className="flex items-center gap-2 text-[11px] text-slate-400 mt-0.5">
-                      <Clock className="w-3 h-3 text-slate-500" />
-                      <span>
-                        {hasArrived
-                          ? 'Target is at your location'
-                          : `~${Math.max(1, Math.round(remainingDistanceMeters / 1.1))}s walk • Step count: ${userPose.stepCount}`}
-                      </span>
+                    <div className="font-semibold text-white text-sm truncate">{room.label}</div>
+                    <div className="text-xs text-slate-400 font-mono tabular-nums">
+                      Room {ROOM_CODES[room.id] || ''}
                     </div>
                   </div>
                 </div>
 
+                <div className="text-right shrink-0">
+                  <div className="text-xs font-mono tabular-nums font-semibold text-sky-400">
+                    {distance.toFixed(1)} m
+                  </div>
+                  <div className="text-[11px] font-medium text-slate-400 mt-0.5">
+                    {isTarget ? 'Routing' : 'Route'}
+                  </div>
+                </div>
+              </button>
+            );
+          })
+        )}
+      </div>
+    </>
+  );
+
+  return (
+    <div className="h-[100dvh] w-full bg-[#0B0F17] text-slate-100 flex flex-col lg:flex-row font-sans select-none overflow-hidden">
+      {/* DESKTOP LEFT WORKSPACE SIDEBAR (lg+) */}
+      <aside className="hidden lg:flex lg:w-[340px] lg:shrink-0 flex-col bg-[#111622] border-r border-white/[0.08] p-5 z-20">
+        {/* Brand Header */}
+        <div className="flex items-center gap-3 pb-4 border-b border-white/[0.08]">
+          <div className="w-9 h-9 rounded-xl bg-gradient-to-tr from-sky-400 to-blue-500 p-[1.5px] shrink-0">
+            <div className="w-full h-full bg-[#111622] rounded-[10px] flex items-center justify-center">
+              <Compass className="w-5 h-5 text-sky-400" aria-hidden="true" />
+            </div>
+          </div>
+          <div className="min-w-0">
+            <h1 className="text-sm font-bold text-white tracking-tight truncate">
+              Indoor Navigation
+            </h1>
+            <p className="text-xs text-slate-400">
+              Floor 1 <span aria-hidden="true">·</span> {peers.length} active peers
+            </p>
+          </div>
+        </div>
+
+        {/* Directory Search, Tabs & List */}
+        <div className="flex-1 min-h-0 flex flex-col pt-4">{renderDirectoryList(false)}</div>
+
+        {/* User Profile & Sign Out Footer */}
+        <div className="pt-4 mt-3 border-t border-white/[0.08] flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <div className="w-8 h-8 rounded-lg bg-sky-400/15 border border-sky-400/30 text-sky-300 font-bold text-xs flex items-center justify-center shrink-0">
+              {(currentUser.name.trim()[0] || 'U').toUpperCase()}
+            </div>
+            <div className="min-w-0">
+              <div className="text-xs font-semibold text-white truncate">
+                Good morning, {firstName}
+              </div>
+              <div className="text-[11px] text-slate-400 truncate">{currentUser.role}</div>
+            </div>
+          </div>
+
+          <button
+            type="button"
+            onClick={onSignOut}
+            className="min-h-[38px] px-3 rounded-lg text-xs font-medium text-slate-300 hover:text-white bg-[#0D121D] hover:bg-slate-800 border border-white/[0.08] transition-colors flex items-center gap-1.5 shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
+            title="Sign Out"
+            aria-label="Sign out"
+          >
+            <LogOut className="w-3.5 h-3.5" aria-hidden="true" />
+            <span>Sign Out</span>
+          </button>
+        </div>
+      </aside>
+
+      {/* MOBILE COMPACT TOP BAR (< lg) */}
+      <header className="lg:hidden h-14 px-3.5 bg-[#111622]/95 border-b border-white/[0.08] backdrop-blur-md flex items-center justify-between gap-2 shrink-0 z-30">
+        <div className="flex items-center gap-2.5 min-w-0">
+          <div className="w-8 h-8 rounded-lg bg-gradient-to-tr from-sky-400 to-blue-500 p-[1.5px] shrink-0">
+            <div className="w-full h-full bg-[#111622] rounded-[6.5px] flex items-center justify-center">
+              <Compass className="w-4 h-4 text-sky-400" aria-hidden="true" />
+            </div>
+          </div>
+          <div className="min-w-0">
+            <h1 className="text-sm font-bold text-white tracking-tight truncate">
+              Indoor Navigation
+            </h1>
+            <p className="text-[11px] text-slate-400 leading-none mt-0.5 truncate">
+              Floor 1 <span aria-hidden="true">·</span> {firstName}
+            </p>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-1.5 shrink-0">
+          <button
+            type="button"
+            onClick={requestSensorAccess}
+            className={`min-h-[40px] px-2.5 rounded-lg text-xs font-medium border transition-colors flex items-center gap-1.5 whitespace-nowrap focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 ${
+              motionSensorsActive
+                ? 'bg-emerald-500/12 text-emerald-300 border-emerald-500/35'
+                : 'bg-[#0D121D] text-slate-200 border-white/[0.1]'
+            }`}
+          >
+            <Smartphone className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+            <span>{motionSensorsActive ? 'Motion' : 'Sensors'}</span>
+          </button>
+
+          {motionSensorsActive && (
+            <button
+              type="button"
+              onClick={alignPhoneHeadingToMap}
+              className="min-h-[40px] px-2.5 rounded-lg text-xs font-medium bg-[#0D121D] text-sky-300 border border-white/[0.1] transition-colors flex items-center gap-1 whitespace-nowrap focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
+              aria-label="Align compass heading to map north"
+            >
+              <Compass className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+              <span>Align</span>
+            </button>
+          )}
+
+          <button
+            type="button"
+            onClick={onSignOut}
+            className="w-10 h-10 rounded-lg text-slate-300 hover:text-white hover:bg-slate-800/80 flex items-center justify-center transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
+            aria-label="Sign out"
+            title="Sign Out"
+          >
+            <LogOut className="w-4 h-4" aria-hidden="true" />
+          </button>
+        </div>
+      </header>
+
+      {/* FULL-BLEED INTERACTIVE SPATIAL MAP VIEWPORT */}
+      <main
+        ref={mapContainerRef}
+        className="flex-1 relative bg-[#0B0F17] overflow-hidden min-h-0"
+      >
+        <canvas
+          ref={canvasRef}
+          onMouseDown={handleMouseDown}
+          onMouseMove={handleMouseMove}
+          onMouseUp={handleMouseUp}
+          onMouseLeave={() => {
+            pointerStateRef.current.isDragging = false;
+          }}
+          onWheel={handleWheel}
+          onTouchStart={handleTouchStart}
+          onTouchMove={handleTouchMove}
+          onTouchEnd={handleTouchEnd}
+          className="block w-full h-full cursor-grab active:cursor-grabbing touch-none"
+        />
+
+        {/* Desktop Floating Sensor Controls (Top-Left of Map) */}
+        <div className="hidden lg:flex items-center gap-2 absolute top-4 left-4 z-20">
+          <button
+            type="button"
+            onClick={requestSensorAccess}
+            className={`min-h-[40px] flex items-center gap-2 px-3.5 rounded-xl text-xs font-medium border backdrop-blur-md transition-colors whitespace-nowrap focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 ${
+              motionSensorsActive
+                ? 'bg-[#111622]/90 text-emerald-300 border-emerald-500/35'
+                : 'bg-[#111622]/90 hover:bg-[#171E2E] text-slate-200 border-white/[0.1]'
+            }`}
+            title="Enable anti-shake walking step detection & compass heading"
+          >
+            <Smartphone className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+            <span>{sensorStatusMessage}</span>
+          </button>
+
+          {motionSensorsActive && (
+            <button
+              type="button"
+              onClick={alignPhoneHeadingToMap}
+              className="min-h-[40px] flex items-center gap-1.5 px-3.5 rounded-xl text-xs font-medium bg-[#111622]/90 hover:bg-[#171E2E] text-sky-300 border border-white/[0.1] backdrop-blur-md transition-colors whitespace-nowrap focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
+              title="Point your phone toward the top of the map and tap Align"
+            >
+              <Compass className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+              <span>Align North</span>
+            </button>
+          )}
+        </div>
+
+        {/* Desktop Floating Wayfinding Guidance Card (Top-Center of Map) */}
+        {activeTarget && (
+          <div className="hidden lg:block absolute top-4 left-1/2 -translate-x-1/2 w-[calc(100%-24rem)] min-w-[360px] max-w-lg z-20 animate-fade-in">
+            <div
+              className={`border rounded-2xl px-4 py-3 shadow-2xl backdrop-blur-xl flex items-center justify-between gap-4 transition-colors ${
+                hasArrived
+                  ? 'bg-emerald-950/92 border-emerald-500/50'
+                  : 'bg-[#111622]/92 border-white/[0.12]'
+              }`}
+            >
+              <div className="flex items-center gap-3 min-w-0">
+                <div
+                  className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 border ${
+                    hasArrived
+                      ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/35'
+                      : 'bg-sky-400/12 text-sky-400 border-sky-400/30'
+                  }`}
+                >
+                  {hasArrived ? (
+                    <CheckCircle2 className="w-5 h-5" aria-hidden="true" />
+                  ) : (
+                    <Navigation className="w-4 h-4" aria-hidden="true" />
+                  )}
+                </div>
+
+                <div className="min-w-0">
+                  <div className="text-xs text-slate-400 truncate">
+                    {hasArrived ? 'Arrived at' : 'Routing to'}{' '}
+                    <span
+                      className={`font-semibold ${
+                        hasArrived ? 'text-emerald-300' : 'text-sky-300'
+                      }`}
+                    >
+                      {activeTarget.name}
+                    </span>
+                  </div>
+                  <div className="text-sm font-semibold text-white truncate mt-0.5">
+                    {hasArrived ? 'Destination reached' : activeTarget.subtext}
+                  </div>
+                  <div className="flex items-center gap-1.5 text-[11px] text-slate-400 mt-0.5 font-mono tabular-nums">
+                    <Clock className="w-3 h-3 text-slate-500 shrink-0" aria-hidden="true" />
+                    <span>
+                      {hasArrived
+                        ? 'At target location'
+                        : `~${Math.max(1, Math.round(remainingDistanceMeters / 1.1))}s walk · ${userPose.stepCount} steps`}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-3 shrink-0">
+                {!hasArrived && (
+                  <div className="text-right">
+                    <div className="text-base font-bold font-mono tabular-nums text-white leading-none">
+                      {remainingDistanceMeters.toFixed(1)} m
+                    </div>
+                    <div className="text-[10px] text-slate-400 mt-1">Remaining</div>
+                  </div>
+                )}
+
                 <button
+                  type="button"
                   onClick={() => {
                     setTargetPeerId(null);
                     setTargetRoomId(null);
                   }}
-                  className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-800/80 hover:bg-slate-700 text-slate-300 hover:text-white transition shrink-0"
+                  className="min-h-[38px] px-3 py-1.5 rounded-xl text-xs font-semibold bg-[#1A2233] hover:bg-slate-800 text-slate-200 border border-white/[0.08] transition-colors whitespace-nowrap focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
                 >
                   {hasArrived ? 'Done' : 'Cancel'}
                 </button>
               </div>
             </div>
-          )}
+          </div>
+        )}
 
+        {/* Map Camera Controls (Bottom-Right on both Phone & Desktop) */}
+        <div className="absolute bottom-3.5 right-3.5 z-20 flex flex-col gap-1.5">
+          <button
+            type="button"
+            onClick={() => zoomBy(1.25)}
+            aria-label="Zoom in"
+            title="Zoom in"
+            className="w-10 h-10 rounded-xl bg-[#111622]/90 hover:bg-[#171E2E] border border-white/[0.1] backdrop-blur-md text-slate-200 flex items-center justify-center transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
+          >
+            <Plus className="w-4 h-4" aria-hidden="true" />
+          </button>
+          <button
+            type="button"
+            onClick={() => zoomBy(0.8)}
+            aria-label="Zoom out"
+            title="Zoom out"
+            className="w-10 h-10 rounded-xl bg-[#111622]/90 hover:bg-[#171E2E] border border-white/[0.1] backdrop-blur-md text-slate-200 flex items-center justify-center transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
+          >
+            <Minus className="w-4 h-4" aria-hidden="true" />
+          </button>
+          <button
+            type="button"
+            onClick={centerOnUser}
+            aria-label="Center on my location"
+            title="Center on my location"
+            className="w-10 h-10 rounded-xl bg-[#111622]/90 hover:bg-[#171E2E] border border-white/[0.1] backdrop-blur-md text-sky-400 flex items-center justify-center transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
+          >
+            <LocateFixed className="w-4 h-4" aria-hidden="true" />
+          </button>
+          <button
+            type="button"
+            onClick={fitFloorPlan}
+            aria-label="Fit entire floor plan"
+            title="Fit floor plan"
+            className="w-10 h-10 rounded-xl bg-[#111622]/90 hover:bg-[#171E2E] border border-white/[0.1] backdrop-blur-md text-slate-300 flex items-center justify-center transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
+          >
+            <Maximize2 className="w-4 h-4" aria-hidden="true" />
+          </button>
+        </div>
+
+        {/* Desktop Subtle Telemetry Pill-Free Strip */}
+        <div className="hidden lg:flex items-center gap-2.5 absolute bottom-3.5 left-1/2 -translate-x-1/2 px-3 py-1.5 rounded-xl bg-[#111622]/85 border border-white/[0.08] backdrop-blur-md text-[11px] text-slate-400 pointer-events-none">
+          <span className="font-mono tabular-nums text-slate-200">
+            HDG {String(userPose.heading).padStart(3, '0')}°
+          </span>
+          <span aria-hidden="true">·</span>
+          <span className="font-mono tabular-nums">{userPose.stepCount} steps</span>
+          <span aria-hidden="true">·</span>
+          <span>Drag to pan, pinch or scroll to zoom</span>
         </div>
       </main>
 
-      {/* 5. Clean Active Users Drawer (Slide-Over Panel) */}
-      {isDrawerOpen && (
-        <div className="fixed inset-0 z-50 flex justify-end bg-black/60 backdrop-blur-sm animate-fade-in">
-          <div className="w-full max-w-sm h-full bg-[#0F172A] border-l border-slate-800 p-6 flex flex-col shadow-2xl animate-slide-left">
-            <div className="flex items-center justify-between pb-4 border-b border-slate-800">
-              <div className="flex items-center gap-2.5">
-                <div className="p-2 rounded-xl bg-cyan-500/10 text-cyan-400">
-                  <Users className="w-5 h-5" />
+      {/* MOBILE THUMB-ZONE BOTTOM WAYFINDING DOCK (< lg) */}
+      <div className="lg:hidden shrink-0 bg-[#111622] border-t border-white/[0.08] px-3.5 py-2.5 z-30">
+        {activeTarget ? (
+          <div className="flex items-center justify-between gap-2.5">
+            <button
+              type="button"
+              onClick={() => setIsMobileSheetOpen(true)}
+              className="flex items-center gap-2.5 min-w-0 flex-1 text-left py-1 rounded-xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
+            >
+              <div
+                className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 border ${
+                  hasArrived
+                    ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/35'
+                    : 'bg-sky-400/12 text-sky-400 border-sky-400/30'
+                }`}
+              >
+                {hasArrived ? (
+                  <CheckCircle2 className="w-5 h-5" aria-hidden="true" />
+                ) : (
+                  <Navigation className="w-4 h-4" aria-hidden="true" />
+                )}
+              </div>
+              <div className="min-w-0">
+                <div className="flex items-center gap-1.5">
+                  <span className="text-sm font-bold text-white truncate">{activeTarget.name}</span>
+                  <ChevronUp className="w-3.5 h-3.5 text-slate-400 shrink-0" aria-hidden="true" />
                 </div>
-                <div>
-                  <h3 className="text-base font-bold text-white leading-tight">Active Building Users</h3>
-                  <p className="text-xs text-slate-400">{peers.length} online peers on Floor 1</p>
+                <div className="text-xs font-mono tabular-nums text-slate-400 truncate">
+                  {hasArrived ? (
+                    <span className="text-emerald-400 font-sans font-medium">
+                      Arrived at destination
+                    </span>
+                  ) : (
+                    <>
+                      <span className="text-sky-400 font-semibold">
+                        {remainingDistanceMeters.toFixed(1)} m
+                      </span>{' '}
+                      · ~{Math.max(1, Math.round(remainingDistanceMeters / 1.1))}s ·{' '}
+                      {userPose.stepCount} steps
+                    </>
+                  )}
                 </div>
               </div>
+            </button>
+
+            <div className="flex items-center gap-1.5 shrink-0">
               <button
-                onClick={() => setIsDrawerOpen(false)}
-                className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition"
+                type="button"
+                onClick={() => setIsMobileSheetOpen(true)}
+                aria-label="Open directory"
+                className="min-h-[42px] px-3 rounded-xl text-xs font-semibold bg-[#182030] text-slate-200 border border-white/[0.08] flex items-center gap-1.5"
+              >
+                <Users className="w-3.5 h-3.5" aria-hidden="true" />
+                <span>List</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setTargetPeerId(null);
+                  setTargetRoomId(null);
+                }}
+                className="min-h-[42px] px-3 rounded-xl text-xs font-semibold bg-slate-800 text-slate-200 border border-white/[0.08]"
+              >
+                {hasArrived ? 'Done' : 'Cancel'}
+              </button>
+            </div>
+          </div>
+        ) : (
+          <button
+            type="button"
+            onClick={() => setIsMobileSheetOpen(true)}
+            className="w-full min-h-[46px] px-4 rounded-xl bg-sky-400 hover:bg-sky-300 text-slate-950 text-sm font-semibold flex items-center justify-between transition-colors"
+          >
+            <span className="flex items-center gap-2">
+              <Users className="w-4 h-4" aria-hidden="true" />
+              <span>Find People &amp; Rooms</span>
+            </span>
+            <span className="text-xs font-mono tabular-nums font-bold">
+              {peers.length} online
+            </span>
+          </button>
+        )}
+      </div>
+
+      {/* MOBILE BOTTOM SHEET DIRECTORY (< lg) */}
+      {isMobileSheetOpen && (
+        <div
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setIsMobileSheetOpen(false);
+          }}
+          className="lg:hidden fixed inset-0 z-50 flex flex-col justify-end bg-black/65 backdrop-blur-sm"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Floor 1 Directory"
+        >
+          <div className="w-full max-h-[78dvh] bg-[#111622] border-t border-white/[0.1] rounded-t-2xl px-4 pt-2.5 pb-6 flex flex-col shadow-2xl animate-sheet-up">
+            {/* Grab Handle */}
+            <div
+              className="w-10 h-1 rounded-full bg-slate-700 mx-auto mb-3 shrink-0"
+              aria-hidden="true"
+            />
+
+            <div className="flex items-center justify-between pb-3 border-b border-white/[0.08]">
+              <div>
+                <h2 className="text-base font-bold text-white leading-tight">Floor 1 Directory</h2>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  {peers.length} active people <span aria-hidden="true">·</span>{' '}
+                  {roomDestinations.length} rooms
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsMobileSheetOpen(false)}
+                aria-label="Close directory"
+                className="w-10 h-10 rounded-xl text-slate-400 hover:text-white hover:bg-slate-800 flex items-center justify-center transition-colors"
               >
                 <X className="w-5 h-5" />
               </button>
             </div>
 
-            <div className="flex-1 overflow-y-auto py-4 space-y-3">
-              {peers.map((peer) => {
-                const distance = Math.hypot(peer.x - userPose.x, peer.y - userPose.y);
-                const isTarget = targetPeerId === peer.id;
-
-                return (
-                  <div
-                    key={peer.id}
-                    className={`p-4 rounded-2xl border transition-all ${
-                      isTarget
-                        ? 'bg-amber-500/10 border-amber-500/40 shadow-lg shadow-amber-500/5'
-                        : 'bg-slate-900/60 border-slate-800/80 hover:border-slate-700'
-                    }`}
-                  >
-                    <div className="flex items-center justify-between mb-3">
-                      <div className="flex items-center gap-3">
-                        <div
-                          className="w-10 h-10 rounded-xl flex items-center justify-center font-bold text-sm"
-                          style={{
-                            backgroundColor: `${peer.avatarColor}20`,
-                            color: peer.avatarColor,
-                            border: `1px solid ${peer.avatarColor}40`,
-                          }}
-                        >
-                          {peer.fullName[0]}
-                        </div>
-                        <div>
-                          <div className="font-bold text-white text-sm">{peer.fullName}</div>
-                          <div className="text-xs text-slate-400">{peer.role}</div>
-                        </div>
-                      </div>
-
-                      <div className="text-right">
-                        <span className="text-xs font-mono font-bold text-cyan-400">
-                          {distance.toFixed(1)} m
-                        </span>
-                        <div className="text-[10px] text-slate-500">Distance</div>
-                      </div>
-                    </div>
-
-                    <div className="flex items-center justify-between pt-2 border-t border-slate-800/60">
-                      <span className="text-xs text-slate-400">{peer.department}</span>
-
-                      <button
-                        onClick={() => {
-                          setTargetPeerId(peer.id);
-                          setTargetRoomId(null);
-                          setIsDrawerOpen(false);
-                        }}
-                        className={`px-4 py-2 rounded-xl text-xs font-bold transition flex items-center gap-1.5 ${
-                          isTarget
-                            ? 'bg-amber-500 text-slate-950 shadow-md shadow-amber-500/20'
-                            : 'bg-cyan-500 hover:bg-cyan-400 text-slate-950 shadow-md shadow-cyan-500/20'
-                        }`}
-                      >
-                        <Navigation className="w-3.5 h-3.5" />
-                        <span>{isTarget ? 'Route Active' : 'Navigate to User'}</span>
-                      </button>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
+            <div className="flex-1 min-h-0 flex flex-col pt-3">{renderDirectoryList(true)}</div>
           </div>
         </div>
       )}
