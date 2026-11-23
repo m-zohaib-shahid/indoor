@@ -1,6 +1,7 @@
 [auth]
 allowed_redirect_urls = [
   "http://localhost:3000",
+  "https://indoor-ruby-xi.vercel.app",
   "https://ais-dev-xcitt3g6rx5rtk4mpbbgof-989091908143.asia-east1.run.app",
   "https://ais-pre-xcitt3g6rx5rtk4mpbbgof-989091908143.asia-east1.run.app",
 ]
