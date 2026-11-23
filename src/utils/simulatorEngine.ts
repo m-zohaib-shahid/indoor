@@ -1,4 +1,12 @@
 import { SimulatorBeacon, SimulatorNode, SimulatorEdge } from '../types/simulator';
+import {
+  FLOOR_WALL_SEGMENTS,
+  USER_COLLISION_RADIUS,
+  WallSegment,
+  distPointToSegmentSq,
+  doesSegmentCrossAnyWall,
+  isPathSegmentClear,
+} from './floorPhysics';
 
 /**
  * Log-Distance Path Loss Model:
@@ -160,7 +168,6 @@ export function runAStar(
     });
 
     if (currentId === targetId) {
-      // Reconstruct
       const pathNodeIds: string[] = [targetId];
       let curr = targetId;
       while (cameFrom.has(curr)) {
@@ -180,7 +187,6 @@ export function runAStar(
     openSet.delete(currentId);
     closedSet.add(currentId);
 
-    const currentNode = nodeMap.get(currentId)!;
     const neighbors = adj.get(currentId) || [];
 
     for (const neighbor of neighbors) {
@@ -206,66 +212,484 @@ export function runAStar(
   return null;
 }
 
+// ============================================================================
+// WALL-AWARE CONTINUOUS NAVIGATION GRID + FUNNEL STRING-PULLING ENGINE
+// ============================================================================
+
+const NAV_GRID_MIN_X = 1.5;
+const NAV_GRID_MIN_Y = 1.5;
+const NAV_GRID_STEP = 0.5;
+const NAV_GRID_COLS = 59; // x: 1.5 .. 30.5
+const NAV_GRID_ROWS = 45; // y: 1.5 .. 23.5
+const NAV_CELL_COUNT = NAV_GRID_COLS * NAV_GRID_ROWS;
+const NAV_CLEARANCE = USER_COLLISION_RADIUS; // 0.34m keeps route + outer glow clear of walls
+const NAV_EDGE_CLEARANCE = 0.28;
+
+interface NavNeighbor {
+  to: number;
+  cost: number;
+}
+
+interface NavGridData {
+  walls: WallSegment[];
+  cellX: Float64Array;
+  cellY: Float64Array;
+  walkable: Uint8Array;
+  neighbors: NavNeighbor[][];
+}
+
+let cachedDefaultNavGrid: NavGridData | null = null;
+
+function buildNavGrid(walls: WallSegment[]): NavGridData {
+  const cellX = new Float64Array(NAV_CELL_COUNT);
+  const cellY = new Float64Array(NAV_CELL_COUNT);
+  const walkable = new Uint8Array(NAV_CELL_COUNT);
+  const neighbors: NavNeighbor[][] = Array.from({ length: NAV_CELL_COUNT }, () => []);
+
+  for (let r = 0; r < NAV_GRID_ROWS; r++) {
+    const y = NAV_GRID_MIN_Y + r * NAV_GRID_STEP;
+    for (let c = 0; c < NAV_GRID_COLS; c++) {
+      const x = NAV_GRID_MIN_X + c * NAV_GRID_STEP;
+      const idx = r * NAV_GRID_COLS + c;
+      cellX[idx] = x;
+      cellY[idx] = y;
+      if (isPathSegmentClear(x, y, x, y, walls, NAV_CLEARANCE)) {
+        walkable[idx] = 1;
+      }
+    }
+  }
+
+  const dirs = [
+    [-1, 0],
+    [1, 0],
+    [0, -1],
+    [0, 1],
+    [-1, -1],
+    [1, -1],
+    [-1, 1],
+    [1, 1],
+  ];
+
+  for (let r = 0; r < NAV_GRID_ROWS; r++) {
+    for (let c = 0; c < NAV_GRID_COLS; c++) {
+      const idx = r * NAV_GRID_COLS + c;
+      if (!walkable[idx]) continue;
+      const x1 = cellX[idx];
+      const y1 = cellY[idx];
+
+      for (const [dc, dr] of dirs) {
+        const nc = c + dc;
+        const nr = r + dr;
+        if (nc < 0 || nc >= NAV_GRID_COLS || nr < 0 || nr >= NAV_GRID_ROWS) continue;
+        const nIdx = nr * NAV_GRID_COLS + nc;
+        if (!walkable[nIdx]) continue;
+
+        const x2 = cellX[nIdx];
+        const y2 = cellY[nIdx];
+        // Strictly reject any grid edge (especially diagonals) that cuts near or across any wall
+        if (isPathSegmentClear(x1, y1, x2, y2, walls, NAV_EDGE_CLEARANCE)) {
+          neighbors[idx].push({
+            to: nIdx,
+            cost: Math.hypot(x2 - x1, y2 - y1),
+          });
+        }
+      }
+    }
+  }
+
+  return { walls, cellX, cellY, walkable, neighbors };
+}
+
+function getNavGrid(walls: WallSegment[]): NavGridData {
+  if (walls === FLOOR_WALL_SEGMENTS) {
+    if (!cachedDefaultNavGrid) {
+      cachedDefaultNavGrid = buildNavGrid(FLOOR_WALL_SEGMENTS);
+    }
+    return cachedDefaultNavGrid;
+  }
+  return buildNavGrid(walls);
+}
+
+function minDistanceToWalls(x: number, y: number, walls: WallSegment[]): number {
+  let minSq = Infinity;
+  for (const w of walls) {
+    const dSq = distPointToSegmentSq(x, y, w.x1, w.y1, w.x2, w.y2);
+    if (dSq < minSq) minSq = dSq;
+  }
+  return Math.sqrt(minSq);
+}
+
+function isEndpointSegmentSafe(
+  ax: number,
+  ay: number,
+  bx: number,
+  by: number,
+  walls: WallSegment[],
+  endpointWallDist: number,
+  isFromStartToInterior: boolean
+): boolean {
+  if (doesSegmentCrossAnyWall(ax, ay, bx, by, walls)) {
+    return false;
+  }
+
+  const len = Math.hypot(bx - ax, by - ay);
+  if (len < 1e-4) return true;
+
+  // Allow endpoint to sit near a wall behind/beside it while keeping the interior span wall-clear
+  const minEndClearance = Math.max(0.06, Math.min(NAV_EDGE_CLEARANCE, endpointWallDist * 0.85));
+  if (!isPathSegmentClear(ax, ay, bx, by, walls, minEndClearance)) {
+    return false;
+  }
+
+  if (len > 0.6) {
+    const tStart = isFromStartToInterior ? Math.min(0.25, 0.25 / len) : 0;
+    const tEnd = isFromStartToInterior ? 1 : Math.max(0.75, 1 - 0.25 / len);
+    const sx = ax + (bx - ax) * tStart;
+    const sy = ay + (by - ay) * tStart;
+    const ex = ax + (bx - ax) * tEnd;
+    const ey = ay + (by - ay) * tEnd;
+    if (!isPathSegmentClear(sx, sy, ex, ey, walls, NAV_EDGE_CLEARANCE)) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+class MinHeap {
+  private items: Array<{ id: number; f: number }> = [];
+
+  get size(): number {
+    return this.items.length;
+  }
+
+  push(id: number, f: number): void {
+    this.items.push({ id, f });
+    this.bubbleUp(this.items.length - 1);
+  }
+
+  pop(): { id: number; f: number } | undefined {
+    if (this.items.length === 0) return undefined;
+    const top = this.items[0];
+    const last = this.items.pop()!;
+    if (this.items.length > 0) {
+      this.items[0] = last;
+      this.sinkDown(0);
+    }
+    return top;
+  }
+
+  private bubbleUp(idx: number): void {
+    const node = this.items[idx];
+    while (idx > 0) {
+      const parentIdx = (idx - 1) >> 1;
+      const parent = this.items[parentIdx];
+      if (node.f >= parent.f) break;
+      this.items[idx] = parent;
+      idx = parentIdx;
+    }
+    this.items[idx] = node;
+  }
+
+  private sinkDown(idx: number): void {
+    const len = this.items.length;
+    while (true) {
+      const leftIdx = idx * 2 + 1;
+      const rightIdx = leftIdx + 1;
+      let smallestIdx = idx;
+
+      if (leftIdx < len && this.items[leftIdx].f < this.items[smallestIdx].f) {
+        smallestIdx = leftIdx;
+      }
+      if (rightIdx < len && this.items[rightIdx].f < this.items[smallestIdx].f) {
+        smallestIdx = rightIdx;
+      }
+      if (smallestIdx === idx) break;
+      const tmp = this.items[idx];
+      this.items[idx] = this.items[smallestIdx];
+      this.items[smallestIdx] = tmp;
+      idx = smallestIdx;
+    }
+  }
+}
+
+function collectVisibleAnchors(
+  point: { x: number; y: number },
+  grid: NavGridData,
+  isStart: boolean
+): Array<{ idx: number; dist: number }> {
+  const endpointWallDist = minDistanceToWalls(point.x, point.y, grid.walls);
+  const strictVisible: Array<{ idx: number; dist: number }> = [];
+  const relaxedVisible: Array<{ idx: number; dist: number }> = [];
+
+  const minC = Math.max(0, Math.floor((point.x - 4.0 - NAV_GRID_MIN_X) / NAV_GRID_STEP));
+  const maxC = Math.min(NAV_GRID_COLS - 1, Math.ceil((point.x + 4.0 - NAV_GRID_MIN_X) / NAV_GRID_STEP));
+  const minR = Math.max(0, Math.floor((point.y - 4.0 - NAV_GRID_MIN_Y) / NAV_GRID_STEP));
+  const maxR = Math.min(NAV_GRID_ROWS - 1, Math.ceil((point.y + 4.0 - NAV_GRID_MIN_Y) / NAV_GRID_STEP));
+
+  for (let r = minR; r <= maxR; r++) {
+    for (let c = minC; c <= maxC; c++) {
+      const idx = r * NAV_GRID_COLS + c;
+      if (!grid.walkable[idx]) continue;
+      const gx = grid.cellX[idx];
+      const gy = grid.cellY[idx];
+      const dist = Math.hypot(gx - point.x, gy - point.y);
+
+      const ax = isStart ? point.x : gx;
+      const ay = isStart ? point.y : gy;
+      const bx = isStart ? gx : point.x;
+      const by = isStart ? gy : point.y;
+
+      if (isPathSegmentClear(ax, ay, bx, by, grid.walls, NAV_EDGE_CLEARANCE)) {
+        strictVisible.push({ idx, dist });
+      } else if (isEndpointSegmentSafe(ax, ay, bx, by, grid.walls, endpointWallDist, isStart)) {
+        relaxedVisible.push({ idx, dist });
+      }
+    }
+  }
+
+  if (strictVisible.length > 0) {
+    strictVisible.sort((a, b) => a.dist - b.dist);
+    return strictVisible.slice(0, 8);
+  }
+  if (relaxedVisible.length > 0) {
+    relaxedVisible.sort((a, b) => a.dist - b.dist);
+    return relaxedVisible.slice(0, 8);
+  }
+
+  // Wide search fallback if point is inside an unusual alcove
+  const fallback: Array<{ idx: number; dist: number }> = [];
+  for (let idx = 0; idx < NAV_CELL_COUNT; idx++) {
+    if (!grid.walkable[idx]) continue;
+    const gx = grid.cellX[idx];
+    const gy = grid.cellY[idx];
+    if (!doesSegmentCrossAnyWall(point.x, point.y, gx, gy, grid.walls)) {
+      fallback.push({ idx, dist: Math.hypot(gx - point.x, gy - point.y) });
+    }
+  }
+  fallback.sort((a, b) => a.dist - b.dist);
+  return fallback.slice(0, 8);
+}
+
+function smoothWaypointsWithStringPulling(
+  rawPoints: Array<{ x: number; y: number }>,
+  walls: WallSegment[]
+): Array<{ x: number; y: number }> {
+  if (rawPoints.length <= 2) return rawPoints;
+
+  const startWallDist = minDistanceToWalls(rawPoints[0].x, rawPoints[0].y, walls);
+  const endPt = rawPoints[rawPoints.length - 1];
+  const endWallDist = minDistanceToWalls(endPt.x, endPt.y, walls);
+
+  const canConnectCleanly = (i: number, j: number): boolean => {
+    const a = rawPoints[i];
+    const b = rawPoints[j];
+    const isStart = i === 0;
+    const isEnd = j === rawPoints.length - 1;
+
+    if (!isStart && !isEnd) {
+      return isPathSegmentClear(a.x, a.y, b.x, b.y, walls, NAV_CLEARANCE);
+    }
+
+    if (doesSegmentCrossAnyWall(a.x, a.y, b.x, b.y, walls)) {
+      return false;
+    }
+
+    if (isStart && isEnd) {
+      return isPathSegmentClear(a.x, a.y, b.x, b.y, walls, NAV_EDGE_CLEARANCE);
+    }
+
+    if (isStart) {
+      return isEndpointSegmentSafe(a.x, a.y, b.x, b.y, walls, startWallDist, true);
+    }
+
+    return isEndpointSegmentSafe(a.x, a.y, b.x, b.y, walls, endWallDist, false);
+  };
+
+  const smoothed: Array<{ x: number; y: number }> = [rawPoints[0]];
+  let anchor = 0;
+  const lastIdx = rawPoints.length - 1;
+
+  while (anchor < lastIdx) {
+    let furthest = anchor + 1;
+    for (let probe = lastIdx; probe > anchor + 1; probe--) {
+      if (canConnectCleanly(anchor, probe)) {
+        furthest = probe;
+        break;
+      }
+    }
+    const nextPt = rawPoints[furthest];
+    const prevPt = smoothed[smoothed.length - 1];
+    if (Math.hypot(nextPt.x - prevPt.x, nextPt.y - prevPt.y) > 0.02 || furthest === lastIdx) {
+      smoothed.push(nextPt);
+    }
+    anchor = furthest;
+  }
+
+  return smoothed;
+}
+
 /**
- * Dynamic A* pathfinding between arbitrary continuous coordinates (start and target)
+ * Computes a mathematically wall-free shortest path through real doorways and corridors
+ * using a 0.5m navigation grid backed by FLOOR_WALL_SEGMENTS + funnel string-pulling.
+ */
+export function findWallFreePath(
+  startPoint: { x: number; y: number },
+  targetPoint: { x: number; y: number },
+  walls: WallSegment[] = FLOOR_WALL_SEGMENTS
+): { pathCoordinates: { x: number; y: number }[]; totalDistance: number } | null {
+  const directDist = Math.hypot(targetPoint.x - startPoint.x, targetPoint.y - startPoint.y);
+  if (directDist < 0.05) {
+    return {
+      pathCoordinates: [startPoint, targetPoint],
+      totalDistance: directDist,
+    };
+  }
+
+  // 1. Direct clear line-of-sight shortcut (never clips a wall or grazes corners)
+  if (
+    isPathSegmentClear(startPoint.x, startPoint.y, targetPoint.x, targetPoint.y, walls, NAV_EDGE_CLEARANCE) ||
+    (!doesSegmentCrossAnyWall(startPoint.x, startPoint.y, targetPoint.x, targetPoint.y, walls) &&
+      directDist <= 0.85)
+  ) {
+    return {
+      pathCoordinates: [startPoint, targetPoint],
+      totalDistance: directDist,
+    };
+  }
+
+  const grid = getNavGrid(walls);
+  const startAnchors = collectVisibleAnchors(startPoint, grid, true);
+  const goalAnchors = collectVisibleAnchors(targetPoint, grid, false);
+
+  if (startAnchors.length === 0 || goalAnchors.length === 0) {
+    return null;
+  }
+
+  const goalExitCost = new Map<number, number>();
+  for (const g of goalAnchors) {
+    goalExitCost.set(g.idx, g.dist);
+  }
+
+  const VIRTUAL_GOAL = NAV_CELL_COUNT;
+  const gScore = new Float64Array(NAV_CELL_COUNT + 1);
+  gScore.fill(Infinity);
+  const cameFrom = new Int32Array(NAV_CELL_COUNT + 1);
+  cameFrom.fill(-1);
+  const closed = new Uint8Array(NAV_CELL_COUNT + 1);
+  const heap = new MinHeap();
+
+  for (const s of startAnchors) {
+    if (s.dist < gScore[s.idx]) {
+      gScore[s.idx] = s.dist;
+      const h = Math.hypot(targetPoint.x - grid.cellX[s.idx], targetPoint.y - grid.cellY[s.idx]);
+      heap.push(s.idx, s.dist + h);
+    }
+  }
+
+  let foundGoal = false;
+  while (heap.size > 0) {
+    const current = heap.pop()!;
+    const u = current.id;
+    if (closed[u]) continue;
+    closed[u] = 1;
+
+    if (u === VIRTUAL_GOAL) {
+      foundGoal = true;
+      break;
+    }
+
+    const exitDist = goalExitCost.get(u);
+    if (exitDist !== undefined) {
+      const tentativeGoalG = gScore[u] + exitDist;
+      if (tentativeGoalG < gScore[VIRTUAL_GOAL]) {
+        gScore[VIRTUAL_GOAL] = tentativeGoalG;
+        cameFrom[VIRTUAL_GOAL] = u;
+        heap.push(VIRTUAL_GOAL, tentativeGoalG);
+      }
+    }
+
+    const uNeighbors = grid.neighbors[u];
+    for (let i = 0; i < uNeighbors.length; i++) {
+      const edge = uNeighbors[i];
+      if (closed[edge.to]) continue;
+      const tentativeG = gScore[u] + edge.cost;
+      if (tentativeG < gScore[edge.to]) {
+        gScore[edge.to] = tentativeG;
+        cameFrom[edge.to] = u;
+        const h = Math.hypot(
+          targetPoint.x - grid.cellX[edge.to],
+          targetPoint.y - grid.cellY[edge.to]
+        );
+        heap.push(edge.to, tentativeG + h);
+      }
+    }
+  }
+
+  if (!foundGoal || cameFrom[VIRTUAL_GOAL] === -1) {
+    return null;
+  }
+
+  // Reconstruct raw grid waypoints
+  const gridCells: Array<{ x: number; y: number }> = [];
+  let curr = cameFrom[VIRTUAL_GOAL];
+  while (curr !== -1) {
+    gridCells.push({ x: grid.cellX[curr], y: grid.cellY[curr] });
+    curr = cameFrom[curr];
+  }
+  gridCells.reverse();
+
+  const rawPoints = [startPoint, ...gridCells, targetPoint];
+  const smoothed = smoothWaypointsWithStringPulling(rawPoints, walls);
+
+  let totalDistance = 0;
+  for (let i = 0; i < smoothed.length - 1; i++) {
+    totalDistance += Math.hypot(
+      smoothed[i + 1].x - smoothed[i].x,
+      smoothed[i + 1].y - smoothed[i].y
+    );
+  }
+
+  return {
+    pathCoordinates: smoothed,
+    totalDistance,
+  };
+}
+
+/**
+ * Dynamic wall-aware A* pathfinding between arbitrary continuous coordinates (start and target)
  */
 export function runAStarBetweenCoordinates(
   nodes: SimulatorNode[],
-  edges: SimulatorEdge[],
+  _edges: SimulatorEdge[],
   startPoint: { x: number; y: number },
   targetPoint: { x: number; y: number }
 ): { pathCoordinates: { x: number; y: number }[]; totalDistance: number; pathNodeIds: string[] } | null {
-  // Find nearest start node
-  let startNode = nodes[0];
-  let minStartDist = Infinity;
-  for (const n of nodes) {
-    const d = Math.hypot(n.x - startPoint.x, n.y - startPoint.y);
-    if (d < minStartDist) {
-      minStartDist = d;
-      startNode = n;
+  const result = findWallFreePath(startPoint, targetPoint, FLOOR_WALL_SEGMENTS);
+  if (!result) {
+    return null;
+  }
+
+  // Map smoothed waypoints to nearby landmark nodes for telemetry/label display
+  const pathNodeIds: string[] = [];
+  for (const pt of result.pathCoordinates) {
+    let nearestId = '';
+    let bestD = 3.5;
+    for (const n of nodes) {
+      const d = Math.hypot(n.x - pt.x, n.y - pt.y);
+      if (d < bestD) {
+        bestD = d;
+        nearestId = n.id;
+      }
+    }
+    if (nearestId && pathNodeIds[pathNodeIds.length - 1] !== nearestId) {
+      pathNodeIds.push(nearestId);
     }
   }
-
-  // Find nearest target node
-  let targetNode = nodes[0];
-  let minTargetDist = Infinity;
-  for (const n of nodes) {
-    const d = Math.hypot(n.x - targetPoint.x, n.y - targetPoint.y);
-    if (d < minTargetDist) {
-      minTargetDist = d;
-      targetNode = n;
-    }
-  }
-
-  const directDist = Math.hypot(startPoint.x - targetPoint.x, startPoint.y - targetPoint.y);
-  if (startNode.id === targetNode.id && directDist < 3.0) {
-    return {
-      pathCoordinates: [startPoint, targetPoint],
-      totalDistance: directDist,
-      pathNodeIds: [startNode.id],
-    };
-  }
-
-  const meshResult = runAStar(nodes, edges, startNode.id, targetNode.id);
-  if (!meshResult) {
-    return {
-      pathCoordinates: [startPoint, targetPoint],
-      totalDistance: directDist,
-      pathNodeIds: [],
-    };
-  }
-
-  const completeCoords = [
-    startPoint,
-    ...meshResult.pathCoordinates,
-    targetPoint,
-  ];
-
-  const totalDist = minStartDist + meshResult.totalDistance + minTargetDist;
 
   return {
-    pathCoordinates: completeCoords,
-    totalDistance: totalDist,
-    pathNodeIds: meshResult.pathNodeIds,
+    pathCoordinates: result.pathCoordinates,
+    totalDistance: result.totalDistance,
+    pathNodeIds,
   };
 }

@@ -154,7 +154,7 @@ export function buildWallSegments(rooms: RoomRect[] = FLOOR_ROOMS): WallSegment[
 
 export const FLOOR_WALL_SEGMENTS: WallSegment[] = buildWallSegments(FLOOR_ROOMS);
 
-function distPointToSegmentSq(
+export function distPointToSegmentSq(
   px: number,
   py: number,
   x1: number,
@@ -182,6 +182,23 @@ function ccw(ax: number, ay: number, bx: number, by: number, cx: number, cy: num
   return (cy - ay) * (bx - ax) - (by - ay) * (cx - ax);
 }
 
+function onSegmentBoundingBox(
+  px: number,
+  py: number,
+  ax: number,
+  ay: number,
+  bx: number,
+  by: number,
+  eps: number = 1e-6
+): boolean {
+  return (
+    px >= Math.min(ax, bx) - eps &&
+    px <= Math.max(ax, bx) + eps &&
+    py >= Math.min(ay, by) - eps &&
+    py <= Math.max(ay, by) + eps
+  );
+}
+
 function segmentsIntersect(
   ax: number,
   ay: number,
@@ -192,14 +209,104 @@ function segmentsIntersect(
   dx: number,
   dy: number
 ): boolean {
+  const eps = 1e-7;
   const d1 = ccw(cx, cy, dx, dy, ax, ay);
   const d2 = ccw(cx, cy, dx, dy, bx, by);
   const d3 = ccw(ax, ay, bx, by, cx, cy);
   const d4 = ccw(ax, ay, bx, by, dx, dy);
-  if (((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) && ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0))) {
+
+  if (
+    ((d1 > eps && d2 < -eps) || (d1 < -eps && d2 > eps)) &&
+    ((d3 > eps && d4 < -eps) || (d3 < -eps && d4 > eps))
+  ) {
     return true;
   }
+
+  // Handle collinear / endpoint-touching intersections safely
+  if (Math.abs(d1) <= eps && onSegmentBoundingBox(ax, ay, cx, cy, dx, dy, eps)) return true;
+  if (Math.abs(d2) <= eps && onSegmentBoundingBox(bx, by, cx, cy, dx, dy, eps)) return true;
+  if (Math.abs(d3) <= eps && onSegmentBoundingBox(cx, cy, ax, ay, bx, by, eps)) return true;
+  if (Math.abs(d4) <= eps && onSegmentBoundingBox(dx, dy, ax, ay, bx, by, eps)) return true;
+
   return false;
+}
+
+export function segmentToSegmentDistanceSq(
+  ax: number,
+  ay: number,
+  bx: number,
+  by: number,
+  cx: number,
+  cy: number,
+  dx: number,
+  dy: number
+): number {
+  if (segmentsIntersect(ax, ay, bx, by, cx, cy, dx, dy)) {
+    return 0;
+  }
+  const d1 = distPointToSegmentSq(ax, ay, cx, cy, dx, dy);
+  const d2 = distPointToSegmentSq(bx, by, cx, cy, dx, dy);
+  const d3 = distPointToSegmentSq(cx, cy, ax, ay, bx, by);
+  const d4 = distPointToSegmentSq(dx, dy, ax, ay, bx, by);
+  return Math.min(d1, d2, d3, d4);
+}
+
+export function doesSegmentCrossAnyWall(
+  x1: number,
+  y1: number,
+  x2: number,
+  y2: number,
+  walls: WallSegment[] = FLOOR_WALL_SEGMENTS
+): boolean {
+  const minX = Math.min(x1, x2);
+  const maxX = Math.max(x1, x2);
+  const minY = Math.min(y1, y2);
+  const maxY = Math.max(y1, y2);
+
+  for (const w of walls) {
+    if (
+      Math.max(w.x1, w.x2) < minX - 1e-5 ||
+      Math.min(w.x1, w.x2) > maxX + 1e-5 ||
+      Math.max(w.y1, w.y2) < minY - 1e-5 ||
+      Math.min(w.y1, w.y2) > maxY + 1e-5
+    ) {
+      continue;
+    }
+    if (segmentsIntersect(x1, y1, x2, y2, w.x1, w.y1, w.x2, w.y2)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export function isPathSegmentClear(
+  x1: number,
+  y1: number,
+  x2: number,
+  y2: number,
+  walls: WallSegment[] = FLOOR_WALL_SEGMENTS,
+  clearance: number = 0.34
+): boolean {
+  const clearSq = clearance * clearance;
+  const minX = Math.min(x1, x2) - clearance;
+  const maxX = Math.max(x1, x2) + clearance;
+  const minY = Math.min(y1, y2) - clearance;
+  const maxY = Math.max(y1, y2) + clearance;
+
+  for (const w of walls) {
+    if (
+      Math.max(w.x1, w.x2) < minX ||
+      Math.min(w.x1, w.x2) > maxX ||
+      Math.max(w.y1, w.y2) < minY ||
+      Math.min(w.y1, w.y2) > maxY
+    ) {
+      continue;
+    }
+    if (segmentToSegmentDistanceSq(x1, y1, x2, y2, w.x1, w.y1, w.x2, w.y2) < clearSq) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function isMoveClear(

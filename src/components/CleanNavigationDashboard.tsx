@@ -17,7 +17,7 @@ import {
   ChevronUp,
 } from 'lucide-react';
 import { BuildingPeer, SimulatorNode, SimulatorEdge, UserPose } from '../types/simulator';
-import { runAStarBetweenCoordinates } from '../utils/simulatorEngine';
+import { findWallFreePath, runAStarBetweenCoordinates } from '../utils/simulatorEngine';
 import {
   AntiShakeStepDetector,
   FLOOR_ROOMS,
@@ -403,6 +403,20 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
 
   const hasArrived = Boolean(activeTarget && liveDirectDistance < 1.4);
 
+  const walkableDistancesById = useMemo(() => {
+    const map = new Map<string, number>();
+    const origin = { x: userPose.x, y: userPose.y };
+    for (const peer of peers) {
+      const res = findWallFreePath(origin, { x: peer.x, y: peer.y });
+      map.set(peer.id, res ? res.totalDistance : Math.hypot(peer.x - origin.x, peer.y - origin.y));
+    }
+    for (const room of roomDestinations) {
+      const res = findWallFreePath(origin, { x: room.x, y: room.y });
+      map.set(room.id, res ? res.totalDistance : Math.hypot(room.x - origin.x, room.y - origin.y));
+    }
+    return map;
+  }, [userPose.x, userPose.y, peers, roomDestinations]);
+
   const filteredPeers = useMemo(() => {
     const q = directorySearch.trim().toLowerCase();
     if (!q) return peers;
@@ -750,12 +764,12 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
       ctx.stroke();
     });
 
-    // 5. Crisp Sky-Cyan Wayfinding Path
+    // 5. Crisp Sky-Cyan Wayfinding Path (strictly routed through doorways around walls)
     if (activeRoute && activeRoute.pathCoordinates.length > 1) {
       const coords = activeRoute.pathCoordinates;
 
       ctx.strokeStyle = 'rgba(56, 189, 248, 0.22)';
-      ctx.lineWidth = Math.max(7, scale * 0.36);
+      ctx.lineWidth = Math.max(7, scale * 0.34);
       ctx.lineCap = 'round';
       ctx.lineJoin = 'round';
       ctx.beginPath();
@@ -772,6 +786,19 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
       coords.forEach((c) => ctx.lineTo(wx(c.x), wy(c.y)));
       ctx.stroke();
       ctx.setLineDash([]);
+
+      // Subtle architectural turn nodes at doorway / corridor bends
+      for (let i = 1; i < coords.length - 1; i++) {
+        const turnX = wx(coords[i].x);
+        const turnY = wy(coords[i].y);
+        ctx.fillStyle = '#0B0F17';
+        ctx.beginPath();
+        ctx.arc(turnX, turnY, Math.max(3, scale * 0.14), 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = '#7DD3FC';
+        ctx.lineWidth = 1.8;
+        ctx.stroke();
+      }
     }
 
     // Room target pin if navigating to a room
@@ -1116,7 +1143,9 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
             </p>
           ) : (
             filteredPeers.map((peer) => {
-              const distance = Math.hypot(peer.x - userPose.x, peer.y - userPose.y);
+              const distance =
+                walkableDistancesById.get(peer.id) ??
+                Math.hypot(peer.x - userPose.x, peer.y - userPose.y);
               const isTarget = targetPeerId === peer.id;
 
               return (
@@ -1179,7 +1208,9 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
           <p className="text-xs text-slate-500 text-center py-8">No matching rooms found.</p>
         ) : (
           filteredRooms.map((room) => {
-            const distance = Math.hypot(room.x - userPose.x, room.y - userPose.y);
+            const distance =
+              walkableDistancesById.get(room.id) ??
+              Math.hypot(room.x - userPose.x, room.y - userPose.y);
             const isTarget = targetRoomId === room.id;
 
             return (
