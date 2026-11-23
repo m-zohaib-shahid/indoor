@@ -75,3 +75,17 @@ export interface AccelerometerSample {
   isPeak: boolean;
   threshold: number;
 }
+
+export type PresenceDeviceType = 'mobile' | 'laptop';
+
+export interface LivePresenceUser {
+  id: string;
+  presenceId?: string;
+  name: string;
+  color: string;
+  x: number;
+  y: number;
+  device: PresenceDeviceType;
+  lastSeen: number;
+}
+

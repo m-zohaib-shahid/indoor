@@ -20,9 +20,13 @@ import {
   Activity,
   Bluetooth,
   Radio,
+  Laptop,
+  ChevronDown,
+  Edit3,
 } from 'lucide-react';
 import {
   BuildingPeer,
+  LivePresenceUser,
   SimulatorBeacon,
   SimulatorNode,
   SimulatorEdge,
@@ -43,6 +47,16 @@ import {
   resolveWallCollision,
   smoothHeadingDegrees,
 } from '../utils/floorPhysics';
+import {
+  detectDeviceType,
+  getOrCreateTabSessionId,
+  getSavedPresenceProfile,
+  LiveFloorPresenceClient,
+  pickAvatarColor,
+  PresenceConnectionStatus,
+  savePresenceProfile,
+  SavedPresenceProfile,
+} from '../services/presenceService';
 
 interface CleanNavigationDashboardProps {
   currentUser: { name: string; role: string; email: string };
@@ -286,6 +300,27 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
 
   const [targetPeerId, setTargetPeerId] = useState<string | null>('peer_hassaan');
   const [targetRoomId, setTargetRoomId] = useState<string | null>(null);
+  const [targetLiveUserId, setTargetLiveUserId] = useState<string | null>(null);
+
+  // Live Multi-User Presence & Demo Bots Toggle state
+  const deviceType = useMemo(() => detectDeviceType(), []);
+  const localPresenceTabId = useMemo(() => getOrCreateTabSessionId(), []);
+  const [presenceProfile, setPresenceProfile] = useState<SavedPresenceProfile | null>(() =>
+    getSavedPresenceProfile()
+  );
+  const [joinNameInput, setJoinNameInput] = useState<string>(() => {
+    const saved = getSavedPresenceProfile();
+    if (saved?.name) return saved.name;
+    const raw = currentUser.name.trim();
+    return raw && raw.toLowerCase() !== 'navigator' ? raw : '';
+  });
+  const [isJoinPromptOpen, setIsJoinPromptOpen] = useState<boolean>(() => !getSavedPresenceProfile());
+  const [liveUsers, setLiveUsers] = useState<LivePresenceUser[]>([]);
+  const [presenceStatus, setPresenceStatus] = useState<PresenceConnectionStatus>('disconnected');
+  const [isOnlineDropdownOpen, setIsOnlineDropdownOpen] = useState(false);
+  const [showDemoBots, setShowDemoBots] = useState(true);
+  const [isSpotPickerActive, setIsSpotPickerActive] = useState(false);
+  const presenceClientRef = useRef<LiveFloorPresenceClient | null>(null);
 
   // Mobile Bottom Sheet Directory State (desktop uses always-visible left sidebar)
   const [isMobileSheetOpen, setIsMobileSheetOpen] = useState(false);
@@ -333,11 +368,50 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
 
   useEffect(() => {
     userPoseRef.current = userPose;
+    if (presenceClientRef.current) {
+      presenceClientRef.current.updateLocalState({
+        x: userPose.x,
+        y: userPose.y,
+      });
+    }
   }, [userPose]);
 
   useEffect(() => {
     beaconsRef.current = beacons;
   }, [beacons]);
+
+  // Connect & sync Live Multi-User Presence over InsForge Realtime channel 'live-indoor-users'
+  useEffect(() => {
+    if (!presenceProfile) return;
+
+    const client = new LiveFloorPresenceClient({
+      localUser: {
+        id: localPresenceTabId,
+        name: presenceProfile.name,
+        color: presenceProfile.color,
+        x: userPoseRef.current.x,
+        y: userPoseRef.current.y,
+        device: deviceType,
+        lastSeen: Date.now(),
+      },
+      onUsersChange: (users) => {
+        setLiveUsers(users);
+      },
+      onStatusChange: (status) => {
+        setPresenceStatus(status);
+      },
+    });
+
+    presenceClientRef.current = client;
+    void client.start();
+
+    return () => {
+      if (presenceClientRef.current === client) {
+        presenceClientRef.current = null;
+      }
+      void client.stop();
+    };
+  }, [presenceProfile, localPresenceTabId, deviceType]);
 
   // Compute camera that fits the entire Floor 1 neatly inside any viewport (portrait phone or wide desktop)
   const computeFitCamera = useCallback((w: number, h: number): MapCamera => {
@@ -428,18 +502,19 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
     }
   }, []);
 
-  // Close mobile sheet or telemetry drawer on Escape
+  // Close mobile sheet, telemetry drawer, or online dropdown on Escape
   useEffect(() => {
-    if (!isMobileSheetOpen && !isTelemetryOpen) return;
+    if (!isMobileSheetOpen && !isTelemetryOpen && !isOnlineDropdownOpen) return;
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         setIsMobileSheetOpen(false);
         setIsTelemetryOpen(false);
+        setIsOnlineDropdownOpen(false);
       }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [isMobileSheetOpen, isTelemetryOpen]);
+  }, [isMobileSheetOpen, isTelemetryOpen, isOnlineDropdownOpen]);
 
   // Step Forward immediately along live headingRef direction
   const stepForward = useCallback((stepLength = 0.7) => {
@@ -474,8 +549,25 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
     });
   }, []);
 
+  const displayedDemoBots = useMemo(
+    () => (showDemoBots ? peers : []),
+    [showDemoBots, peers]
+  );
+
   const activeTarget = useMemo(() => {
-    if (targetPeerId) {
+    if (targetLiveUserId) {
+      const liveUser = liveUsers.find((u) => u.id === targetLiveUserId);
+      if (liveUser) {
+        return {
+          id: liveUser.id,
+          name: liveUser.name,
+          subtext: `Live User · ${liveUser.device === 'mobile' ? 'Mobile' : 'Laptop'}`,
+          coords: { x: liveUser.x, y: liveUser.y },
+          isPeer: true,
+        };
+      }
+    }
+    if (targetPeerId && showDemoBots) {
       const peer = peers.find((p) => p.id === targetPeerId);
       if (peer) {
         return {
@@ -500,7 +592,7 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
       }
     }
     return null;
-  }, [targetPeerId, targetRoomId, peers, nodes]);
+  }, [targetLiveUserId, liveUsers, targetPeerId, showDemoBots, targetRoomId, peers, nodes]);
 
   const activeRoute = useMemo(() => {
     if (!activeTarget) return null;
@@ -530,7 +622,11 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
   const walkableDistancesById = useMemo(() => {
     const map = new Map<string, number>();
     const origin = { x: userPose.x, y: userPose.y };
-    for (const peer of peers) {
+    for (const lu of liveUsers) {
+      const res = findWallFreePath(origin, { x: lu.x, y: lu.y });
+      map.set(lu.id, res ? res.totalDistance : Math.hypot(lu.x - origin.x, lu.y - origin.y));
+    }
+    for (const peer of displayedDemoBots) {
       const res = findWallFreePath(origin, { x: peer.x, y: peer.y });
       map.set(peer.id, res ? res.totalDistance : Math.hypot(peer.x - origin.x, peer.y - origin.y));
     }
@@ -539,18 +635,26 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
       map.set(room.id, res ? res.totalDistance : Math.hypot(room.x - origin.x, room.y - origin.y));
     }
     return map;
-  }, [userPose.x, userPose.y, peers, roomDestinations]);
+  }, [userPose.x, userPose.y, liveUsers, displayedDemoBots, roomDestinations]);
+
+  const filteredLiveUsers = useMemo(() => {
+    const q = directorySearch.trim().toLowerCase();
+    if (!q) return liveUsers;
+    return liveUsers.filter(
+      (u) => u.name.toLowerCase().includes(q) || u.device.toLowerCase().includes(q)
+    );
+  }, [liveUsers, directorySearch]);
 
   const filteredPeers = useMemo(() => {
     const q = directorySearch.trim().toLowerCase();
-    if (!q) return peers;
-    return peers.filter(
+    if (!q) return displayedDemoBots;
+    return displayedDemoBots.filter(
       (p) =>
         p.fullName.toLowerCase().includes(q) ||
         p.department.toLowerCase().includes(q) ||
         p.role.toLowerCase().includes(q)
     );
-  }, [peers, directorySearch]);
+  }, [displayedDemoBots, directorySearch]);
 
   const filteredRooms = useMemo(() => {
     const q = directorySearch.trim().toLowerCase();
@@ -1381,8 +1485,8 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
       ctx.stroke();
     }
 
-    // 6. Building Peers
-    peers.forEach((peer) => {
+    // 6. Building Demo Bots (optional toggle) + Real-Time Connected Live Users
+    displayedDemoBots.forEach((peer) => {
       const px = wx(peer.x);
       const py = wy(peer.y);
       const isTarget = targetPeerId === peer.id;
@@ -1435,6 +1539,56 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
         const w = ctx.measureText(first).width;
         ctx.fillText(first, px - w / 2, py - 10);
       }
+    });
+
+    // Live Connected Users (Supabase/InsForge Realtime Presence)
+    liveUsers.forEach((lu) => {
+      const lx = wx(lu.x);
+      const ly = wy(lu.y);
+      const isTarget = targetLiveUserId === lu.id;
+
+      // Soft colored aura
+      ctx.fillStyle = `${lu.color}2A`;
+      ctx.beginPath();
+      ctx.arc(lx, ly, isTarget ? 15 + pulseAnim * 12 : 13, 0, Math.PI * 2);
+      ctx.fill();
+
+      if (isTarget) {
+        ctx.strokeStyle = lu.color;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(lx, ly, 10 + pulseAnim * 20, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+
+      // Crisp user pin
+      ctx.fillStyle = lu.color;
+      ctx.beginPath();
+      ctx.arc(lx, ly, 7.5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = '#FFFFFF';
+      ctx.lineWidth = 2.5;
+      ctx.stroke();
+
+      // Name tag pill above marker
+      const tagText = lu.name;
+      ctx.font = '600 11px "Plus Jakarta Sans", system-ui, sans-serif';
+      const tagWidth = ctx.measureText(tagText).width;
+      const pillW = tagWidth + 16;
+      const pillH = 22;
+      const pillX = Math.max(8, Math.min(viewW - pillW - 8, lx - pillW / 2));
+      const pillY = Math.max(8, ly - 34);
+
+      ctx.fillStyle = 'rgba(17, 22, 34, 0.95)';
+      ctx.beginPath();
+      ctx.roundRect(pillX, pillY, pillW, pillH, 6);
+      ctx.fill();
+      ctx.strokeStyle = isTarget ? '#FFFFFF' : `${lu.color}B8`;
+      ctx.lineWidth = 1.25;
+      ctx.stroke();
+
+      ctx.fillStyle = '#F8FAFC';
+      ctx.fillText(tagText, pillX + 8, pillY + 14.5);
     });
 
     // 6.5 Virtual BLE Beacons + Raw Jitter vs. 1D Kalman Trilateration Overlay
@@ -1540,6 +1694,25 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
     ctx.lineWidth = 2.5;
     ctx.stroke();
 
+    // Distinct "You" Marker Tag so current user is immediately distinguishable from peers
+    const youText = presenceProfile ? `You · ${presenceProfile.name.split(' ')[0]}` : 'You';
+    ctx.font = '700 10.5px "Plus Jakarta Sans", system-ui, sans-serif';
+    const youTextW = ctx.measureText(youText).width;
+    const youBoxW = youTextW + 14;
+    const youBoxH = 20;
+    const youBoxX = Math.max(8, Math.min(viewW - youBoxW - 8, ux - youBoxW / 2));
+    const youBoxY = Math.min(viewH - youBoxH - 8, uy + 14);
+
+    ctx.fillStyle = 'rgba(30, 58, 138, 0.94)';
+    ctx.beginPath();
+    ctx.roundRect(youBoxX, youBoxY, youBoxW, youBoxH, 6);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(147, 197, 253, 0.85)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    ctx.fillStyle = '#FFFFFF';
+    ctx.fillText(youText, youBoxX + 7, youBoxY + 13.5);
+
     // 8. Architectural 5m Scale Bar (bottom-left)
     const scaleX = 16;
     const scaleY = viewH - 16;
@@ -1564,8 +1737,11 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
     camera,
     userPose,
     activeRoute,
-    peers,
+    displayedDemoBots,
+    liveUsers,
+    presenceProfile,
     targetPeerId,
+    targetLiveUserId,
     targetRoomId,
     activeTarget,
     pulseAnim,
@@ -1576,7 +1752,7 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
     kalmanTrilatPose,
   ]);
 
-  // Select peer or room from canvas screen tap coordinates
+  // Select live user / peer / room OR set laptop coordinate from canvas click coordinates
   const selectMapTargetAtClientPoint = useCallback(
     (clientX: number, clientY: number) => {
       const canvas = canvasRef.current;
@@ -1587,22 +1763,55 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
       const meterX = (screenX - camera.panX) / camera.scale;
       const meterY = (screenY - camera.panY) / camera.scale;
 
-      const clickedPeer = peers.find((p) => Math.hypot(p.x - meterX, p.y - meterY) < 1.8);
-      if (clickedPeer) {
-        setTargetPeerId(clickedPeer.id);
-        setTargetRoomId(null);
-        return;
+      if (!isSpotPickerActive) {
+        const clickedLiveUser = liveUsers.find((u) => Math.hypot(u.x - meterX, u.y - meterY) < 1.8);
+        if (clickedLiveUser) {
+          setTargetLiveUserId(clickedLiveUser.id);
+          setTargetPeerId(null);
+          setTargetRoomId(null);
+          return;
+        }
+
+        if (showDemoBots) {
+          const clickedPeer = peers.find((p) => Math.hypot(p.x - meterX, p.y - meterY) < 1.8);
+          if (clickedPeer) {
+            setTargetPeerId(clickedPeer.id);
+            setTargetLiveUserId(null);
+            setTargetRoomId(null);
+            return;
+          }
+        }
+
+        const clickedRoom = nodes.find(
+          (n) => Math.hypot(n.x - meterX, n.y - meterY) < 2.2 && n.type === 'room'
+        );
+        if (clickedRoom) {
+          setTargetRoomId(clickedRoom.id);
+          setTargetPeerId(null);
+          setTargetLiveUserId(null);
+          return;
+        }
       }
 
-      const clickedRoom = nodes.find(
-        (n) => Math.hypot(n.x - meterX, n.y - meterY) < 3.0 && n.type === 'room'
-      );
-      if (clickedRoom) {
-        setTargetRoomId(clickedRoom.id);
-        setTargetPeerId(null);
+      // Laptop spot placement (or explicit Relocate Spot mode): click anywhere on the floor plan
+      if (
+        (isSpotPickerActive || (deviceType === 'laptop' && !isSimulating)) &&
+        meterX >= WORLD_BOUNDS.minX + 0.45 &&
+        meterX <= WORLD_BOUNDS.maxX - 0.45 &&
+        meterY >= WORLD_BOUNDS.minY + 0.45 &&
+        meterY <= WORLD_BOUNDS.maxY - 0.45
+      ) {
+        const clampedX = Number(meterX.toFixed(2));
+        const clampedY = Number(meterY.toFixed(2));
+        setUserPose((prev) => ({
+          ...prev,
+          x: clampedX,
+          y: clampedY,
+        }));
+        setIsSpotPickerActive(false);
       }
     },
-    [camera, peers, nodes]
+    [camera, isSpotPickerActive, liveUsers, showDemoBots, peers, nodes, deviceType, isSimulating]
   );
 
   // Mouse pan & click handlers
@@ -1710,7 +1919,9 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
   };
 
   const firstName = currentUser.name.trim().split(/\s+/)[0] || 'Navigator';
-  const onlinePeersCount = peers.filter((p) => p.isOnline).length;
+  const totalLiveOnlineCount = (presenceProfile ? 1 : 0) + liveUsers.length;
+  const totalDirectoryPeopleCount = liveUsers.length + (showDemoBots ? peers.length : 0);
+  const onlinePeersCount = liveUsers.length + (showDemoBots ? peers.filter((p) => p.isOnline).length : 0);
   const positioningMode: 'Simulation' | 'Hardware BLE' | 'PDR Sensors' = isSimulating
     ? 'Simulation'
     : bleState === 'connected'
@@ -1722,6 +1933,19 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
     bleState !== 'connected' &&
     !bleSuggestionDismissed &&
     (bleState === 'unsupported' || bleState === 'denied');
+
+  const handleJoinMapSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    const clean = joinNameInput.trim();
+    if (!clean) return;
+    const profile: SavedPresenceProfile = {
+      name: clean,
+      color: presenceProfile?.color || pickAvatarColor(`${clean}_${localPresenceTabId}`),
+    };
+    savePresenceProfile(profile);
+    setPresenceProfile(profile);
+    setIsJoinPromptOpen(false);
+  };
 
   // Reusable Directory List Content (shared between Desktop Left Sidebar & Mobile Bottom Sheet)
   const renderDirectoryList = (isMobileSheet: boolean) => (
@@ -1758,7 +1982,7 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
                 : 'text-slate-400 hover:text-white'
             }`}
           >
-            People ({peers.length})
+            People ({totalDirectoryPeopleCount})
           </button>
           <button
             type="button"
@@ -1774,76 +1998,166 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
             Rooms ({roomDestinations.length})
           </button>
         </div>
+
+        {directoryTab === 'people' && (
+          <div className="flex items-center justify-between px-3 py-2 rounded-xl bg-[#0D121D] border border-white/[0.08]">
+            <span className="text-xs text-slate-300 font-medium">Demo Bots</span>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={showDemoBots}
+              onClick={() => setShowDemoBots((prev) => !prev)}
+              className={`min-h-[34px] px-2.5 rounded-lg text-[11px] font-mono font-semibold border transition-colors ${
+                showDemoBots
+                  ? 'bg-sky-400/15 text-sky-300 border-sky-400/40'
+                  : 'bg-[#141B2B] text-slate-400 border-white/[0.08]'
+              }`}
+            >
+              {showDemoBots ? 'ON' : 'OFF'}
+            </button>
+          </div>
+        )}
       </div>
 
       <div className="flex-1 overflow-y-auto pt-3 space-y-2">
         {directoryTab === 'people' ? (
-          filteredPeers.length === 0 ? (
+          filteredLiveUsers.length === 0 && filteredPeers.length === 0 ? (
             <p className="text-xs text-slate-500 text-center py-8">
-              No matching building users found.
+              {showDemoBots
+                ? 'No matching users found.'
+                : 'No other live users connected yet. Toggle Demo Bots ON or open a second tab.'}
             </p>
           ) : (
-            filteredPeers.map((peer) => {
-              const distance =
-                walkableDistancesById.get(peer.id) ??
-                Math.hypot(peer.x - userPose.x, peer.y - userPose.y);
-              const isTarget = targetPeerId === peer.id;
+            <>
+              {filteredLiveUsers.map((lu) => {
+                const distance =
+                  walkableDistancesById.get(lu.id) ??
+                  Math.hypot(lu.x - userPose.x, lu.y - userPose.y);
+                const isTarget = targetLiveUserId === lu.id;
 
-              return (
-                <button
-                  key={peer.id}
-                  type="button"
-                  onClick={() => {
-                    if (isTarget) {
-                      setTargetPeerId(null);
-                    } else {
-                      setTargetPeerId(peer.id);
-                      setTargetRoomId(null);
-                    }
-                    if (isMobileSheet) setIsMobileSheetOpen(false);
-                  }}
-                  className={`w-full text-left p-3 rounded-xl border transition-colors flex items-center justify-between gap-3 min-h-[60px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 ${
-                    isTarget
-                      ? 'bg-amber-500/12 border-amber-400/50'
-                      : 'bg-[#0D121D] border-white/[0.06] hover:border-white/[0.16] hover:bg-[#141B2B]'
-                  }`}
-                >
-                  <div className="flex items-center gap-3 min-w-0">
-                    <div
-                      className="w-9 h-9 rounded-lg flex items-center justify-center font-bold text-xs shrink-0"
-                      style={{
-                        backgroundColor: `${peer.avatarColor}20`,
-                        color: peer.avatarColor,
-                        border: `1px solid ${peer.avatarColor}45`,
-                      }}
-                    >
-                      {peer.fullName[0]}
-                    </div>
-                    <div className="min-w-0">
-                      <div className="font-semibold text-white text-sm truncate">
-                        {peer.fullName}
+                return (
+                  <button
+                    key={lu.id}
+                    type="button"
+                    onClick={() => {
+                      if (isTarget) {
+                        setTargetLiveUserId(null);
+                      } else {
+                        setTargetLiveUserId(lu.id);
+                        setTargetPeerId(null);
+                        setTargetRoomId(null);
+                      }
+                      if (isMobileSheet) setIsMobileSheetOpen(false);
+                    }}
+                    className={`w-full text-left p-3 rounded-xl border transition-colors flex items-center justify-between gap-3 min-h-[60px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 ${
+                      isTarget
+                        ? 'bg-emerald-500/12 border-emerald-400/50'
+                        : 'bg-[#0D121D] border-white/[0.08] hover:border-white/[0.18] hover:bg-[#141B2B]'
+                    }`}
+                  >
+                    <div className="flex items-center gap-3 min-w-0">
+                      <div
+                        className="w-9 h-9 rounded-lg flex items-center justify-center font-bold text-xs shrink-0"
+                        style={{
+                          backgroundColor: `${lu.color}25`,
+                          color: lu.color,
+                          border: `1px solid ${lu.color}55`,
+                        }}
+                      >
+                        {lu.name[0]?.toUpperCase() || 'U'}
                       </div>
-                      <div className="text-xs text-slate-400 truncate">
-                        {peer.department} <span aria-hidden="true">·</span> {peer.role}
+                      <div className="min-w-0">
+                        <div className="font-semibold text-white text-sm truncate flex items-center gap-1.5">
+                          <span className="truncate">{lu.name}</span>
+                          <span className="text-[10px] font-mono uppercase text-emerald-400 shrink-0">
+                            Live
+                          </span>
+                        </div>
+                        <div className="text-xs text-slate-400 truncate capitalize">
+                          {lu.device} <span aria-hidden="true">·</span> Real-time position
+                        </div>
                       </div>
                     </div>
-                  </div>
 
-                  <div className="text-right shrink-0">
-                    <div
-                      className={`text-xs font-mono tabular-nums font-semibold ${
-                        isTarget ? 'text-amber-300' : 'text-sky-400'
-                      }`}
-                    >
-                      {distance.toFixed(1)} m
+                    <div className="text-right shrink-0">
+                      <div
+                        className={`text-xs font-mono tabular-nums font-semibold ${
+                          isTarget ? 'text-emerald-300' : 'text-sky-400'
+                        }`}
+                      >
+                        {distance.toFixed(1)} m
+                      </div>
+                      <div className="text-[11px] font-medium text-slate-400 mt-0.5">
+                        {isTarget ? 'Routing' : 'Route'}
+                      </div>
                     </div>
-                    <div className="text-[11px] font-medium text-slate-400 mt-0.5">
-                      {isTarget ? 'Routing' : 'Route'}
+                  </button>
+                );
+              })}
+
+              {filteredPeers.map((peer) => {
+                const distance =
+                  walkableDistancesById.get(peer.id) ??
+                  Math.hypot(peer.x - userPose.x, peer.y - userPose.y);
+                const isTarget = targetPeerId === peer.id;
+
+                return (
+                  <button
+                    key={peer.id}
+                    type="button"
+                    onClick={() => {
+                      if (isTarget) {
+                        setTargetPeerId(null);
+                      } else {
+                        setTargetPeerId(peer.id);
+                        setTargetLiveUserId(null);
+                        setTargetRoomId(null);
+                      }
+                      if (isMobileSheet) setIsMobileSheetOpen(false);
+                    }}
+                    className={`w-full text-left p-3 rounded-xl border transition-colors flex items-center justify-between gap-3 min-h-[60px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 ${
+                      isTarget
+                        ? 'bg-amber-500/12 border-amber-400/50'
+                        : 'bg-[#0D121D] border-white/[0.06] hover:border-white/[0.16] hover:bg-[#141B2B]'
+                    }`}
+                  >
+                    <div className="flex items-center gap-3 min-w-0">
+                      <div
+                        className="w-9 h-9 rounded-lg flex items-center justify-center font-bold text-xs shrink-0"
+                        style={{
+                          backgroundColor: `${peer.avatarColor}20`,
+                          color: peer.avatarColor,
+                          border: `1px solid ${peer.avatarColor}45`,
+                        }}
+                      >
+                        {peer.fullName[0]}
+                      </div>
+                      <div className="min-w-0">
+                        <div className="font-semibold text-white text-sm truncate">
+                          {peer.fullName}
+                        </div>
+                        <div className="text-xs text-slate-400 truncate">
+                          {peer.department} <span aria-hidden="true">·</span> {peer.role}
+                        </div>
+                      </div>
                     </div>
-                  </div>
-                </button>
-              );
-            })
+
+                    <div className="text-right shrink-0">
+                      <div
+                        className={`text-xs font-mono tabular-nums font-semibold ${
+                          isTarget ? 'text-amber-300' : 'text-sky-400'
+                        }`}
+                      >
+                        {distance.toFixed(1)} m
+                      </div>
+                      <div className="text-[11px] font-medium text-slate-400 mt-0.5">
+                        {isTarget ? 'Routing' : 'Route'}
+                      </div>
+                    </div>
+                  </button>
+                );
+              })}
+            </>
           )
         ) : filteredRooms.length === 0 ? (
           <p className="text-xs text-slate-500 text-center py-8">No matching rooms found.</p>
@@ -1864,6 +2178,7 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
                   } else {
                     setTargetRoomId(room.id);
                     setTargetPeerId(null);
+                    setTargetLiveUserId(null);
                   }
                   if (isMobileSheet) setIsMobileSheetOpen(false);
                 }}
@@ -1915,7 +2230,8 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
           <div className="min-w-0">
             <h1 className="text-sm font-bold text-white tracking-tight truncate">IndoorNav</h1>
             <p className="text-xs text-slate-400 font-mono tabular-nums">
-              Floor 1 <span aria-hidden="true">·</span> {onlinePeersCount} active peers
+              Floor 1 <span aria-hidden="true">·</span> {totalLiveOnlineCount} live{' '}
+              <span aria-hidden="true">·</span> {onlinePeersCount} peers
             </p>
           </div>
         </div>
@@ -2032,32 +2348,50 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
           className="block w-full h-full cursor-grab active:cursor-grabbing touch-none"
         />
 
-        {/* Mobile Floating Sensor & BLE Controls (Top-Left of Map) */}
-        <div className="lg:hidden flex flex-wrap items-center gap-1.5 absolute top-3 left-3 right-3 z-20 pointer-events-none">
-          <button
-            type="button"
-            onClick={requestSensorAccess}
-            className={`pointer-events-auto min-h-[44px] px-3 rounded-xl text-xs font-medium border backdrop-blur-md transition-colors flex items-center gap-1.5 whitespace-nowrap focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 ${
-              motionSensorsActive
-                ? 'bg-[#111622]/92 text-emerald-300 border-emerald-500/35'
-                : 'bg-[#111622]/92 text-slate-200 border-white/[0.1]'
-            }`}
-          >
-            <Smartphone className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
-            <span>{motionSensorsActive ? 'Motion Active' : 'Sensors'}</span>
-          </button>
-
-          {motionSensorsActive && (
+        {/* Mobile Floating Sensor & Online Pill Controls (Top of Map) */}
+        <div className="lg:hidden flex items-start justify-between gap-2 absolute top-3 inset-x-3 z-20 pointer-events-none">
+          <div className="flex flex-wrap items-center gap-1.5 pointer-events-auto">
             <button
               type="button"
-              onClick={alignPhoneHeadingToMap}
-              className="pointer-events-auto min-h-[44px] px-3 rounded-xl text-xs font-medium bg-[#111622]/92 text-sky-300 border border-white/[0.1] backdrop-blur-md transition-colors flex items-center gap-1.5 whitespace-nowrap focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
-              aria-label="Align compass heading to map north"
+              onClick={requestSensorAccess}
+              className={`min-h-[44px] px-3 rounded-xl text-xs font-medium border backdrop-blur-md transition-colors flex items-center gap-1.5 whitespace-nowrap focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 ${
+                motionSensorsActive
+                  ? 'bg-[#111622]/92 text-emerald-300 border-emerald-500/35'
+                  : 'bg-[#111622]/92 text-slate-200 border-white/[0.1]'
+              }`}
             >
-              <Compass className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
-              <span>Align</span>
+              <Smartphone className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+              <span>{motionSensorsActive ? 'Motion Active' : 'Sensors'}</span>
             </button>
-          )}
+
+            {motionSensorsActive && (
+              <button
+                type="button"
+                onClick={alignPhoneHeadingToMap}
+                className="min-h-[44px] px-3 rounded-xl text-xs font-medium bg-[#111622]/92 text-sky-300 border border-white/[0.1] backdrop-blur-md transition-colors flex items-center gap-1.5 whitespace-nowrap focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
+                aria-label="Align compass heading to map north"
+              >
+                <Compass className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                <span>Align</span>
+              </button>
+            )}
+          </div>
+
+          <button
+            type="button"
+            onClick={() => setIsOnlineDropdownOpen((prev) => !prev)}
+            aria-expanded={isOnlineDropdownOpen}
+            className="pointer-events-auto min-h-[44px] px-3 rounded-xl text-xs font-semibold bg-[#111622]/94 hover:bg-[#171E2E] text-white border border-white/[0.12] backdrop-blur-md flex items-center gap-2 whitespace-nowrap shadow-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
+          >
+            <span
+              className={`w-2 h-2 rounded-full ${
+                presenceStatus === 'connected' ? 'bg-emerald-400' : 'bg-amber-400'
+              }`}
+              aria-hidden="true"
+            />
+            <span className="font-mono tabular-nums">{totalLiveOnlineCount} Online</span>
+            <ChevronDown className="w-3.5 h-3.5 text-slate-400" aria-hidden="true" />
+          </button>
         </div>
 
         {/* Desktop Floating Top Control Bar (Non-overlapping Left + Right groups) */}
@@ -2121,27 +2455,287 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
             )}
           </div>
 
-          <button
-            type="button"
-            onClick={() => setIsTelemetryOpen((prev) => !prev)}
-            aria-expanded={isTelemetryOpen}
-            className={`pointer-events-auto min-h-[44px] flex items-center gap-2 px-3.5 rounded-xl text-xs font-medium border backdrop-blur-md transition-colors whitespace-nowrap focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 ${
-              isTelemetryOpen
-                ? 'bg-white text-slate-950 border-white'
-                : 'bg-[#111622]/92 hover:bg-[#171E2E] text-slate-100 border-white/[0.1]'
-            }`}
-          >
-            <Activity className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
-            <span>Telemetry</span>
-            <span
-              className={`font-mono text-[11px] ${
-                isTelemetryOpen ? 'text-slate-600' : 'text-sky-400'
+          <div className="flex items-center gap-2 pointer-events-auto">
+            <button
+              type="button"
+              onClick={() => setIsOnlineDropdownOpen((prev) => !prev)}
+              aria-expanded={isOnlineDropdownOpen}
+              className={`min-h-[44px] flex items-center gap-2 px-3.5 rounded-xl text-xs font-semibold border backdrop-blur-md transition-colors whitespace-nowrap focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 ${
+                isOnlineDropdownOpen
+                  ? 'bg-emerald-500/15 text-emerald-200 border-emerald-400/50'
+                  : 'bg-[#111622]/92 hover:bg-[#171E2E] text-white border-white/[0.12]'
               }`}
             >
-              {positioningMode}
-            </span>
-          </button>
+              <span
+                className={`w-2 h-2 rounded-full ${
+                  presenceStatus === 'connected' ? 'bg-emerald-400' : 'bg-amber-400'
+                }`}
+                aria-hidden="true"
+              />
+              <span className="font-mono tabular-nums">{totalLiveOnlineCount} Online</span>
+              <ChevronDown className="w-3.5 h-3.5 text-slate-400" aria-hidden="true" />
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setIsTelemetryOpen((prev) => !prev)}
+              aria-expanded={isTelemetryOpen}
+              className={`min-h-[44px] flex items-center gap-2 px-3.5 rounded-xl text-xs font-medium border backdrop-blur-md transition-colors whitespace-nowrap focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 ${
+                isTelemetryOpen
+                  ? 'bg-white text-slate-950 border-white'
+                  : 'bg-[#111622]/92 hover:bg-[#171E2E] text-slate-100 border-white/[0.1]'
+              }`}
+            >
+              <Activity className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+              <span>Telemetry</span>
+              <span
+                className={`font-mono text-[11px] ${
+                  isTelemetryOpen ? 'text-slate-600' : 'text-sky-400'
+                }`}
+              >
+                {positioningMode}
+              </span>
+            </button>
+          </div>
         </div>
+
+        {/* Clickable Online Users Dropdown Overlay (Mobile & Desktop) */}
+        {isOnlineDropdownOpen && (
+          <>
+            <div
+              onClick={() => setIsOnlineDropdownOpen(false)}
+              className="fixed inset-0 z-30"
+              aria-hidden="true"
+            />
+            <div
+              role="dialog"
+              aria-label="Online Floor Users"
+              className="absolute top-[64px] right-3 lg:right-3.5 z-40 w-[min(328px,calc(100vw-24px))] max-h-[70dvh] bg-[#111622]/98 backdrop-blur-xl border border-white/[0.12] rounded-2xl shadow-2xl flex flex-col overflow-hidden"
+            >
+              <div className="px-4 py-3 border-b border-white/[0.08] flex items-center justify-between gap-2">
+                <div>
+                  <div className="text-xs font-bold text-white flex items-center gap-2">
+                    <span
+                      className={`w-2 h-2 rounded-full ${
+                        presenceStatus === 'connected' ? 'bg-emerald-400' : 'bg-amber-400'
+                      }`}
+                      aria-hidden="true"
+                    />
+                    <span>Online Users ({totalLiveOnlineCount})</span>
+                  </div>
+                  <div className="text-[11px] text-slate-400 font-mono mt-0.5">
+                    channel: live-indoor-users · {presenceStatus}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setIsOnlineDropdownOpen(false)}
+                  aria-label="Close online users menu"
+                  className="w-9 h-9 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 flex items-center justify-center"
+                >
+                  <X className="w-4 h-4" aria-hidden="true" />
+                </button>
+              </div>
+
+              <div className="flex-1 overflow-y-auto p-3 space-y-2">
+                {/* Local User Row */}
+                <div className="p-2.5 rounded-xl bg-[#0D121D] border border-sky-400/25 flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <div
+                      className="w-8 h-8 rounded-lg flex items-center justify-center font-bold text-xs text-white shrink-0"
+                      style={{
+                        backgroundColor: presenceProfile?.color || '#3B82F6',
+                      }}
+                    >
+                      {(presenceProfile?.name || firstName)[0]?.toUpperCase() || 'Y'}
+                    </div>
+                    <div className="min-w-0">
+                      <div className="text-xs font-semibold text-white truncate">
+                        You · {presenceProfile?.name || 'Guest'}
+                      </div>
+                      <div className="text-[11px] text-slate-400 font-mono tabular-nums flex items-center gap-1">
+                        {deviceType === 'laptop' ? (
+                          <Laptop className="w-3 h-3" aria-hidden="true" />
+                        ) : (
+                          <Smartphone className="w-3 h-3" aria-hidden="true" />
+                        )}
+                        <span>
+                          ({userPose.x.toFixed(1)}, {userPose.y.toFixed(1)})
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsOnlineDropdownOpen(false);
+                      setIsJoinPromptOpen(true);
+                    }}
+                    className="min-h-[36px] px-2.5 rounded-lg text-[11px] font-medium bg-[#141B2B] hover:bg-slate-800 text-slate-200 border border-white/[0.08] flex items-center gap-1 shrink-0"
+                  >
+                    <Edit3 className="w-3 h-3" aria-hidden="true" />
+                    <span>Name</span>
+                  </button>
+                </div>
+
+                {/* Remote Connected Live Users */}
+                {liveUsers.length === 0 ? (
+                  <p className="text-[11px] text-slate-400 text-center py-4 px-2">
+                    No other devices connected yet. Open this app in another tab or mobile browser to see live markers appear.
+                  </p>
+                ) : (
+                  liveUsers.map((lu) => {
+                    const dist =
+                      walkableDistancesById.get(lu.id) ??
+                      Math.hypot(lu.x - userPose.x, lu.y - userPose.y);
+                    const isRouting = targetLiveUserId === lu.id;
+                    return (
+                      <button
+                        key={lu.id}
+                        type="button"
+                        onClick={() => {
+                          setTargetLiveUserId(isRouting ? null : lu.id);
+                          setTargetPeerId(null);
+                          setTargetRoomId(null);
+                          setIsOnlineDropdownOpen(false);
+                        }}
+                        className={`w-full min-h-[48px] p-2.5 rounded-xl border text-left flex items-center justify-between gap-2 transition-colors ${
+                          isRouting
+                            ? 'bg-emerald-500/15 border-emerald-400/50'
+                            : 'bg-[#0D121D] border-white/[0.08] hover:border-white/[0.2]'
+                        }`}
+                      >
+                        <div className="flex items-center gap-2.5 min-w-0">
+                          <div
+                            className="w-8 h-8 rounded-lg flex items-center justify-center font-bold text-xs text-slate-950 shrink-0"
+                            style={{ backgroundColor: lu.color }}
+                          >
+                            {lu.name[0]?.toUpperCase() || 'U'}
+                          </div>
+                          <div className="min-w-0">
+                            <div className="text-xs font-semibold text-white truncate">{lu.name}</div>
+                            <div className="text-[11px] text-slate-400 capitalize">
+                              {lu.device} · ({lu.x.toFixed(1)}, {lu.y.toFixed(1)})
+                            </div>
+                          </div>
+                        </div>
+                        <div className="text-right shrink-0">
+                          <div className="text-xs font-mono tabular-nums font-semibold text-sky-400">
+                            {dist.toFixed(1)} m
+                          </div>
+                          <div className="text-[10px] text-slate-400">
+                            {isRouting ? 'Routing' : 'Navigate'}
+                          </div>
+                        </div>
+                      </button>
+                    );
+                  })
+                )}
+              </div>
+
+              <div className="p-3 border-t border-white/[0.08] bg-[#0D121D]/80 space-y-2">
+                {deviceType === 'laptop' && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsSpotPickerActive((prev) => !prev);
+                      setIsOnlineDropdownOpen(false);
+                    }}
+                    className={`w-full min-h-[44px] px-3 rounded-xl text-xs font-medium border transition-colors flex items-center justify-between ${
+                      isSpotPickerActive
+                        ? 'bg-sky-400 text-slate-950 border-sky-300'
+                        : 'bg-[#141B2B] hover:bg-[#1B2438] text-slate-200 border-white/[0.08]'
+                    }`}
+                  >
+                    <span className="flex items-center gap-2">
+                      <MapPin className="w-3.5 h-3.5" aria-hidden="true" />
+                      <span>Set My Spot on Map</span>
+                    </span>
+                    <span className="text-[11px] font-mono">
+                      {isSpotPickerActive ? 'Click map' : 'Laptop'}
+                    </span>
+                  </button>
+                )}
+
+                <div className="flex items-center justify-between px-3 py-2 rounded-xl bg-[#141B2B] border border-white/[0.08]">
+                  <span className="text-xs font-medium text-slate-200">Demo Bots</span>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={showDemoBots}
+                    onClick={() => setShowDemoBots((prev) => !prev)}
+                    className={`min-h-[34px] px-3 rounded-lg text-xs font-mono font-semibold border transition-colors ${
+                      showDemoBots
+                        ? 'bg-sky-400/20 text-sky-300 border-sky-400/40'
+                        : 'bg-[#0D121D] text-slate-400 border-white/[0.08]'
+                    }`}
+                  >
+                    {showDemoBots ? 'ON' : 'OFF'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </>
+        )}
+
+        {/* Non-Intrusive 1-Step "Join Floor Map" Prompt */}
+        {isJoinPromptOpen && (
+          <div className="absolute top-[68px] left-1/2 -translate-x-1/2 z-40 w-[min(380px,calc(100%-24px))]">
+            <form
+              onSubmit={handleJoinMapSubmit}
+              className="bg-[#111622]/96 backdrop-blur-xl border border-sky-400/35 rounded-2xl p-4 shadow-2xl space-y-3"
+            >
+              <div className="flex items-start justify-between gap-2">
+                <div>
+                  <h2 className="text-sm font-bold text-white">Join Floor Map</h2>
+                  <p className="text-xs text-slate-400 mt-0.5">
+                    {deviceType === 'mobile'
+                      ? 'Share your live indoor position with others on Floor 1.'
+                      : 'Appear on the map now. Click any corridor spot to set your position.'}
+                  </p>
+                </div>
+                {presenceProfile && (
+                  <button
+                    type="button"
+                    onClick={() => setIsJoinPromptOpen(false)}
+                    aria-label="Close join prompt"
+                    className="w-9 h-9 rounded-lg text-slate-400 hover:text-white flex items-center justify-center"
+                  >
+                    <X className="w-4 h-4" aria-hidden="true" />
+                  </button>
+                )}
+              </div>
+
+              <div className="flex items-center gap-2">
+                <input
+                  type="text"
+                  value={joinNameInput}
+                  onChange={(e) => setJoinNameInput(e.target.value)}
+                  placeholder="Enter your display name..."
+                  aria-label="Your display name for the floor map"
+                  maxLength={32}
+                  autoFocus
+                  className="flex-1 min-w-0 min-h-[44px] bg-[#0D121D] border border-white/[0.12] focus:border-sky-400 rounded-xl px-3 py-2 text-sm text-white placeholder:text-slate-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
+                />
+                <button
+                  type="submit"
+                  disabled={!joinNameInput.trim()}
+                  className="min-h-[44px] px-4 rounded-xl bg-sky-400 hover:bg-sky-300 disabled:opacity-50 disabled:cursor-not-allowed text-slate-950 text-xs font-bold whitespace-nowrap transition-colors"
+                >
+                  Join Map
+                </button>
+              </div>
+            </form>
+          </div>
+        )}
+
+        {/* Laptop Spot-Picker Active Hint */}
+        {isSpotPickerActive && (
+          <div className="absolute top-[68px] left-1/2 -translate-x-1/2 z-30 px-3.5 py-2 rounded-xl bg-sky-400 text-slate-950 text-xs font-semibold shadow-xl flex items-center gap-2">
+            <MapPin className="w-3.5 h-3.5" aria-hidden="true" />
+            <span>Click anywhere on the floor plan to place your marker</span>
+          </div>
+        )}
 
         {/* Desktop Floating Wayfinding Guidance Card (Anchored cleanly below Top-Left controls) */}
         {activeTarget && (
@@ -2207,6 +2801,7 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
                   type="button"
                   onClick={() => {
                     setTargetPeerId(null);
+                    setTargetLiveUserId(null);
                     setTargetRoomId(null);
                   }}
                   className="min-h-[44px] px-3 rounded-xl text-xs font-semibold bg-[#1A2233] hover:bg-slate-800 text-slate-200 border border-white/[0.08] transition-colors whitespace-nowrap focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
@@ -2487,19 +3082,30 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
                 <div className="flex items-center justify-between">
                   <span className="text-[11px] uppercase tracking-wider text-slate-400 font-semibold flex items-center gap-1.5">
                     <Radio className="w-3.5 h-3.5 text-emerald-400" aria-hidden="true" />
-                    <span>Realtime Peers</span>
+                    <span>Realtime Presence</span>
                   </span>
                   <span className="text-xs font-mono tabular-nums font-semibold text-emerald-400">
-                    {onlinePeersCount} online
+                    {totalLiveOnlineCount} live
                   </span>
                 </div>
                 <div className="space-y-1">
-                  {peers.map((peer) => (
+                  {liveUsers.map((lu) => (
+                    <div
+                      key={lu.id}
+                      className="flex items-center justify-between text-[11px] py-1 border-b border-white/[0.04] last:border-b-0"
+                    >
+                      <span className="text-emerald-300 truncate">{lu.name}</span>
+                      <span className="font-mono tabular-nums text-slate-400 shrink-0">
+                        ({lu.x.toFixed(1)}, {lu.y.toFixed(1)})
+                      </span>
+                    </div>
+                  ))}
+                  {displayedDemoBots.map((peer) => (
                     <div
                       key={peer.id}
                       className="flex items-center justify-between text-[11px] py-1 border-b border-white/[0.04] last:border-b-0"
                     >
-                      <span className="text-slate-200 truncate">{peer.fullName}</span>
+                      <span className="text-slate-300 truncate">{peer.fullName}</span>
                       <span className="font-mono tabular-nums text-slate-400 shrink-0">
                         ({peer.x.toFixed(1)}, {peer.y.toFixed(1)})
                       </span>
@@ -2570,6 +3176,7 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
                 type="button"
                 onClick={() => {
                   setTargetPeerId(null);
+                  setTargetLiveUserId(null);
                   setTargetRoomId(null);
                 }}
                 className="min-h-[44px] px-3 rounded-xl text-xs font-semibold bg-slate-800 text-slate-200 border border-white/[0.08]"
