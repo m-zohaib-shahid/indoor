@@ -935,9 +935,9 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
       const accLin = e.acceleration;
       if (!accG && !accLin) return;
 
-      const ax = accG?.x ?? accLin?.x ?? 0;
-      const ay = accG?.y ?? accLin?.y ?? 0;
-      const az = accG?.z ?? accLin?.z ?? 0;
+      const ax = accG?.x ?? 0;
+      const ay = accG?.y ?? 0;
+      const az = accG?.z ?? 0;
 
       const result = stepDetectorRef.current.processSample({
         ax,
@@ -989,13 +989,17 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
 
     let hasAbsoluteOrientation = false;
     const onAbsOrientation = (e: Event) => {
-      hasAbsoluteOrientation = true;
-      handleOrientation(e as DeviceOrientationEvent);
+      const de = e as DeviceOrientationEvent;
+      if (de.alpha !== null && !Number.isNaN(de.alpha)) {
+        hasAbsoluteOrientation = true;
+      }
+      handleOrientation(de);
     };
     const onOrientation = (e: DeviceOrientationEvent) => {
+      const compass = (e as unknown as { webkitCompassHeading?: number }).webkitCompassHeading;
       if (
         !hasAbsoluteOrientation ||
-        (e as unknown as { webkitCompassHeading?: number }).webkitCompassHeading !== undefined
+        (compass !== undefined && compass !== null)
       ) {
         handleOrientation(e);
       }
@@ -1017,30 +1021,27 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
 
   const requestSensorAccess = async () => {
     try {
-      if (
-        typeof (DeviceOrientationEvent as unknown as { requestPermission?: () => Promise<string> })
-          .requestPermission === 'function'
-      ) {
-        const perm = await (
-          DeviceOrientationEvent as unknown as { requestPermission: () => Promise<string> }
-        ).requestPermission();
-        if (perm !== 'granted') {
-          setSensorStatusMessage('Permission Denied');
-          return;
-        }
-      }
-      if (
-        typeof (DeviceMotionEvent as unknown as { requestPermission?: () => Promise<string> })
-          .requestPermission === 'function'
-      ) {
-        await (
-          DeviceMotionEvent as unknown as { requestPermission: () => Promise<string> }
-        ).requestPermission();
+      const reqOri = (
+        DeviceOrientationEvent as unknown as { requestPermission?: () => Promise<string> }
+      )?.requestPermission;
+      const reqMot = (
+        DeviceMotionEvent as unknown as { requestPermission?: () => Promise<string> }
+      )?.requestPermission;
+
+      const oriPromise = typeof reqOri === 'function' ? reqOri() : Promise.resolve('granted');
+      const motPromise = typeof reqMot === 'function' ? reqMot() : Promise.resolve('granted');
+
+      const [oriPerm, motPerm] = await Promise.all([oriPromise, motPromise]);
+      if (oriPerm !== 'granted' || motPerm !== 'granted') {
+        setMotionSensorsActive(false);
+        setSensorStatusMessage('Permission Denied');
+        return;
       }
 
       attachMotionListeners();
     } catch {
-      attachMotionListeners();
+      setMotionSensorsActive(false);
+      setSensorStatusMessage('Permission Denied');
     }
   };
 

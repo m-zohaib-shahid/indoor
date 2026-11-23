@@ -430,6 +430,8 @@ export interface StepDetectionResult {
  */
 export class AntiShakeStepDetector {
   private gravityMag = 9.81;
+  private gravityInitialized = false;
+  private lastSampleTimeMs = 0;
   private smoothAcc = 0;
   private peakAcc = 0;
   private peakTimeMs = 0;
@@ -440,14 +442,16 @@ export class AntiShakeStepDetector {
   private rapidPeakCount = 0;
   private shakeLockoutUntilMs = 0;
 
-  private readonly minStepIntervalMs = 400; // Max ~2.5 steps/sec (human walking)
-  private readonly maxGyroDegPerSec = 125;  // Sitting wrist-shakes exceed this easily
-  private readonly peakThreshold = 1.35;    // m/s^2 above gravity
-  private readonly valleyThreshold = -0.82; // m/s^2 below gravity
-  private readonly minPeakToValley = 2.45;  // Total stride amplitude
+  private readonly minStepIntervalMs = 320; // Supports slow to brisk indoor walking
+  private readonly maxGyroDegPerSec = 250;  // Rejects rapid wrist-shaking while allowing normal walking turns
+  private readonly peakThreshold = 0.52;    // m/s^2 above gravity (reliable for handheld phone walking)
+  private readonly valleyThreshold = -0.32; // m/s^2 below gravity
+  private readonly minPeakToValley = 1.05;  // Total stride peak-to-valley amplitude
 
   public reset(): void {
     this.gravityMag = 9.81;
+    this.gravityInitialized = false;
+    this.lastSampleTimeMs = 0;
     this.smoothAcc = 0;
     this.peakAcc = 0;
     this.peakTimeMs = 0;
@@ -460,69 +464,64 @@ export class AntiShakeStepDetector {
 
   public processSample(sample: MotionSampleInput): StepDetectionResult {
     const now = sample.timestampMs;
+    const dtSec =
+      this.lastSampleTimeMs > 0
+        ? Math.min(0.2, Math.max(0.005, (now - this.lastSampleTimeMs) / 1000))
+        : 0.016;
+    this.lastSampleTimeMs = now;
+
     const rawMag = Math.hypot(sample.ax, sample.ay, sample.az);
-    if (rawMag < 0.5) {
+    const hasLin =
+      sample.linAx !== undefined &&
+      sample.linAx !== null &&
+      sample.linAy !== undefined &&
+      sample.linAy !== null &&
+      sample.linAz !== undefined &&
+      sample.linAz !== null;
+    const linMag = hasLin
+      ? Math.hypot(sample.linAx as number, sample.linAy as number, sample.linAz as number)
+      : 0;
+
+    if (rawMag < 4.5 && linMag < 0.05) {
       return { stepDetected: false, shakeRejected: false, stepLengthMeters: 0 };
     }
 
-    // 1. Gyroscope wrist-shake gate (sitting and waving/shaking phone generates high angular velocity)
+    // 1. Gyroscope wrist-shake gate (rapid waving/shaking generates very high angular velocity)
     const rotMag = Math.hypot(
       sample.rotAlpha ?? 0,
       sample.rotBeta ?? 0,
       sample.rotGamma ?? 0
     );
     if (rotMag > this.maxGyroDegPerSec) {
-      this.shakeLockoutUntilMs = Math.max(this.shakeLockoutUntilMs, now + 750);
+      this.shakeLockoutUntilMs = Math.max(this.shakeLockoutUntilMs, now + 700);
       this.inPeakPhase = false;
       this.peakAcc = 0;
       return { stepDetected: false, shakeRejected: true, stepLengthMeters: 0 };
     }
 
-    // 2. Dynamic acceleration signal (prefer gravity-aligned vertical component when hardware provides it)
+    // 2. Orientation-invariant dynamic acceleration signal
     let dynAcc: number;
-    if (
-      sample.linAx !== undefined &&
-      sample.linAx !== null &&
-      sample.linAy !== undefined &&
-      sample.linAy !== null &&
-      sample.linAz !== undefined &&
-      sample.linAz !== null
-    ) {
-      const gx = sample.ax - sample.linAx;
-      const gy = sample.ay - sample.linAy;
-      const gz = sample.az - sample.linAz;
-      const gLen = Math.hypot(gx, gy, gz);
-      const linMag = Math.hypot(sample.linAx, sample.linAy, sample.linAz);
-
-      if (gLen > 4.0) {
-        // Projection along gravity vector (negative = upward bounce)
-        const verticalBounce = -(
-          (sample.linAx * gx + sample.linAy * gy + sample.linAz * gz) /
-          gLen
-        );
-        // Reject pure horizontal lateral shakes (e.g. waving phone left/right while seated)
-        if (linMag > 2.2 && Math.abs(verticalBounce) < linMag * 0.42) {
-          this.inPeakPhase = false;
-          return { stepDetected: false, shakeRejected: true, stepLengthMeters: 0 };
-        }
-        dynAcc = verticalBounce;
-      } else {
-        this.gravityMag = 0.92 * this.gravityMag + 0.08 * rawMag;
-        dynAcc = rawMag - this.gravityMag;
+    if (rawMag >= 4.5) {
+      if (!this.gravityInitialized) {
+        this.gravityMag = rawMag;
+        this.gravityInitialized = true;
       }
-    } else {
-      // Adaptive gravity tracker
-      const alpha = Math.abs(rawMag - this.gravityMag) < 1.2 ? 0.12 : 0.04;
-      this.gravityMag = (1 - alpha) * this.gravityMag + alpha * rawMag;
+      // 1.2s slow baseline tracker so 1-2Hz walking steps are preserved intact at any sensor Hz
+      const gravAlpha = 1 - Math.exp(-dtSec / 1.2);
+      this.gravityMag = (1 - gravAlpha) * this.gravityMag + gravAlpha * rawMag;
       dynAcc = rawMag - this.gravityMag;
+    } else {
+      // Fallback for devices that emit linear acceleration without gravity
+      dynAcc = linMag - 0.6;
     }
 
-    // Fast low-latency EMA smoothing (keeps step response <20ms while cutting electrical noise)
-    this.smoothAcc = 0.68 * dynAcc + 0.32 * this.smoothAcc;
+    // Fast 35ms low-pass smoothing (cuts electrical jitter across 20Hz-120Hz sensors)
+    const smoothAlpha = 1 - Math.exp(-dtSec / 0.035);
+    this.smoothAcc = smoothAlpha * dynAcc + (1 - smoothAlpha) * this.smoothAcc;
 
     // Violent impact / furious hand-shake lockout
-    if (Math.abs(this.smoothAcc) > 7.8) {
-      this.shakeLockoutUntilMs = Math.max(this.shakeLockoutUntilMs, now + 900);
+    if (Math.abs(this.smoothAcc) > 9.0) {
+      this.shakeLockoutUntilMs = Math.max(this.shakeLockoutUntilMs, now + 800);
       this.inPeakPhase = false;
       this.peakAcc = 0;
       return { stepDetected: false, shakeRejected: true, stepLengthMeters: 0 };
@@ -536,11 +535,11 @@ export class AntiShakeStepDetector {
     // 3. Biphasic Heel-Strike Peak -> Unweighting Valley Gait State Machine
     if (this.smoothAcc > this.peakThreshold) {
       if (!this.inPeakPhase) {
-        // Detect rapid hand-shake frequency (>3.2 Hz)
-        if (now - this.lastPeakTimeMs < 300) {
+        // Detect sustained rapid hand-shake frequency (>4.3 Hz)
+        if (now - this.lastPeakTimeMs < 230) {
           this.rapidPeakCount += 1;
-          if (this.rapidPeakCount >= 2) {
-            this.shakeLockoutUntilMs = now + 900;
+          if (this.rapidPeakCount >= 3) {
+            this.shakeLockoutUntilMs = now + 800;
             this.rapidPeakCount = 0;
             this.inPeakPhase = false;
             return { stepDetected: false, shakeRejected: true, stepLengthMeters: 0 };
@@ -560,17 +559,16 @@ export class AntiShakeStepDetector {
       const elapsedSincePeak = now - this.peakTimeMs;
 
       // Peak expired without a valid stride valley
-      if (elapsedSincePeak > 520) {
+      if (elapsedSincePeak > 650) {
         this.inPeakPhase = false;
         this.peakAcc = 0;
         return { stepDetected: false, shakeRejected: false, stepLengthMeters: 0 };
       }
 
       // Valid downward swing valley reached
-      if (this.smoothAcc < this.valleyThreshold && elapsedSincePeak >= 95) {
+      if (this.smoothAcc < this.valleyThreshold && elapsedSincePeak >= 60) {
         const amplitude = this.peakAcc - this.smoothAcc;
         this.inPeakPhase = false;
-        const savedPeak = this.peakAcc;
         this.peakAcc = 0;
 
         if (
@@ -578,9 +576,9 @@ export class AntiShakeStepDetector {
           now - this.lastStepTimeMs >= this.minStepIntervalMs
         ) {
           this.lastStepTimeMs = now;
-          // Weinberg stride length model bounded to realistic [0.55m, 0.85m]
-          const weinberg = 0.44 * Math.pow(Math.max(1.0, savedPeak - this.smoothAcc), 0.25);
-          const stepLen = Number(Math.max(0.55, Math.min(0.85, weinberg)).toFixed(2));
+          // Weinberg stride length model bounded to realistic [0.58m, 0.85m]
+          const weinberg = 0.48 * Math.pow(Math.max(1.0, amplitude), 0.25);
+          const stepLen = Number(Math.max(0.58, Math.min(0.85, weinberg)).toFixed(2));
           return {
             stepDetected: true,
             shakeRejected: false,
