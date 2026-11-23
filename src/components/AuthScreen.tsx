@@ -458,7 +458,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
   const showOAuthSection = hasGoogle || hasGitHub;
 
   return (
-    <div className="min-h-screen w-full bg-[#0B0F17] text-slate-100 flex items-center justify-center px-4 py-8 sm:px-6 lg:px-10 relative overflow-x-hidden">
+    <div className="min-h-[100dvh] w-full bg-[#0B0F17] text-slate-100 flex items-center justify-center px-4 py-8 sm:px-6 lg:px-10 relative overflow-x-hidden">
       {/* Subtle Architectural Backdrop */}
       <div
         aria-hidden="true"

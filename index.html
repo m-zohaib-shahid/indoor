@@ -1,21 +1,124 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" class="overflow-x-hidden">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-    <title>Indoor Navigation</title>
-    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%23111622'/%3E%3Ccircle cx='32' cy='32' r='20' fill='none' stroke='%2338BDF8' stroke-opacity='0.35' stroke-width='2.5'/%3E%3Ccircle cx='32' cy='32' r='13' fill='none' stroke='%2338BDF8' stroke-opacity='0.6' stroke-width='2'/%3E%3Cpolygon points='32,14 40,32 32,28 24,32' fill='%2338BDF8'/%3E%3Cpolygon points='32,50 40,32 32,36 24,32' fill='%233B82F6'/%3E%3Ccircle cx='32' cy='32' r='3' fill='%23FFFFFF'/%3E%3C/svg%3E" />
-    <meta name="description" content="Enterprise real-time Indoor Positioning, peer discovery, and floor plan wayfinding." />
-    <meta property="og:title" content="Indoor Navigation" />
-    <meta property="og:description" content="Enterprise real-time Indoor Positioning, peer discovery, and floor plan wayfinding." />
+    <title>IndoorNav — Zero-Cost BLE &amp; PDR Indoor Positioning System</title>
+    <meta
+      name="description"
+      content="Real-time smartphone indoor positioning and A* floor navigation powered by BLE trilateration, 1D Kalman filtering, Pedestrian Dead Reckoning (PDR), and Supabase Realtime."
+    />
+    <meta name="theme-color" content="#0B0F17" />
+    <link rel="canonical" href="https://indoor-ruby-xi.vercel.app/" />
+
+    <!-- Crisp Inline SVG Navigation Pin Favicon -->
+    <link
+      rel="icon"
+      type="image/svg+xml"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%230B0F17'/%3E%3Crect x='2' y='2' width='60' height='60' rx='14' fill='none' stroke='%2338BDF8' stroke-opacity='0.38' stroke-width='2'/%3E%3Cpath d='M32 14C23.7 14 17 20.7 17 29c0 10.6 12.6 21.8 13.9 22.9a1.7 1.7 0 0 0 2.2 0C34.4 50.8 47 39.6 47 29c0-8.3-6.7-15-15-15z' fill='%2338BDF8'/%3E%3Ccircle cx='32' cy='28.5' r='5.5' fill='%230B0F17'/%3E%3Ccircle cx='32' cy='28.5' r='2.5' fill='%23FFFFFF'/%3E%3C/svg%3E"
+    />
+
+    <!-- Open Graph / Social Preview -->
     <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="IndoorNav" />
+    <meta property="og:url" content="https://indoor-ruby-xi.vercel.app/" />
+    <meta property="og:title" content="IndoorNav — Zero-Cost BLE &amp; PDR Indoor Positioning System" />
+    <meta
+      property="og:description"
+      content="Real-time smartphone indoor positioning and A* floor navigation powered by BLE trilateration, 1D Kalman filtering, Pedestrian Dead Reckoning (PDR), and Supabase Realtime."
+    />
+    <meta property="og:image" content="https://indoor-ruby-xi.vercel.app/og-image.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="IndoorNav interactive Floor 1 indoor positioning and A* wayfinding map" />
+
+    <!-- Twitter / X Card -->
     <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:url" content="https://indoor-ruby-xi.vercel.app/" />
+    <meta name="twitter:title" content="IndoorNav — Zero-Cost BLE &amp; PDR Indoor Positioning System" />
+    <meta
+      name="twitter:description"
+      content="Real-time smartphone indoor positioning and A* floor navigation powered by BLE trilateration, 1D Kalman filtering, Pedestrian Dead Reckoning (PDR), and Supabase Realtime."
+    />
+    <meta name="twitter:image" content="https://indoor-ruby-xi.vercel.app/og-image.png" />
+
+    <!-- Structured Data (Schema.org WebApplication) -->
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "WebApplication",
+        "name": "IndoorNav",
+        "url": "https://indoor-ruby-xi.vercel.app/",
+        "applicationCategory": "NavigationApplication",
+        "operatingSystem": "All",
+        "description": "Real-time smartphone indoor positioning and A* floor navigation powered by BLE trilateration, 1D Kalman filtering, Pedestrian Dead Reckoning (PDR), and Supabase Realtime.",
+        "offers": {
+          "@type": "Offer",
+          "price": "0",
+          "priceCurrency": "USD"
+        }
+      }
+    </script>
+
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
+    <link
+      href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      @keyframes indoornav-pulse {
+        0%, 100% { opacity: 0.45; }
+        50% { opacity: 0.85; }
+      }
+      .initial-shell {
+        min-height: 100dvh;
+        width: 100%;
+        background-color: #0b0f17;
+        color: #f8fafc;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 24px;
+        box-sizing: border-box;
+        font-family: "Plus Jakarta Sans", ui-sans-serif, system-ui, sans-serif;
+      }
+      .initial-card {
+        width: 100%;
+        max-width: 420px;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 16px;
+        background: #111622;
+        padding: 24px;
+        box-sizing: border-box;
+      }
+      .initial-bar {
+        border-radius: 8px;
+        background: rgba(148, 163, 184, 0.14);
+        animation: indoornav-pulse 1.5s ease-in-out infinite;
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .initial-bar { animation: none; opacity: 0.65; }
+      }
+    </style>
   </head>
-  <body class="bg-[#0B0F17] text-slate-100 antialiased selection:bg-sky-400 selection:text-slate-950">
-    <div id="root"></div>
+  <body class="bg-[#0B0F17] text-slate-100 antialiased overflow-x-hidden selection:bg-sky-400 selection:text-slate-950">
+    <div id="root">
+      <div class="initial-shell" aria-busy="true" aria-label="Loading IndoorNav">
+        <div class="initial-card">
+          <div style="display:flex;align-items:center;gap:12px;margin-bottom:20px;">
+            <div style="width:40px;height:40px;border-radius:10px;border:1px solid rgba(56,189,248,0.35);background:rgba(56,189,248,0.1);flex-shrink:0;"></div>
+            <div style="flex:1;min-width:0;">
+              <div style="font-size:15px;font-weight:700;color:#f8fafc;letter-spacing:-0.01em;">IndoorNav</div>
+              <div style="font-size:12px;color:#94a3b8;margin-top:2px;">Initializing spatial positioning engine</div>
+            </div>
+          </div>
+          <div class="initial-bar" style="height:12px;width:72%;margin-bottom:10px;"></div>
+          <div class="initial-bar" style="height:12px;width:92%;margin-bottom:18px;"></div>
+          <div class="initial-bar" style="height:132px;width:100%;border-radius:12px;"></div>
+        </div>
+      </div>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

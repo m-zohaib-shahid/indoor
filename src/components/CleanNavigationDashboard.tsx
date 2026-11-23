@@ -15,9 +15,27 @@ import {
   LocateFixed,
   Maximize2,
   ChevronUp,
+  Play,
+  Square,
+  Activity,
+  Bluetooth,
+  Radio,
 } from 'lucide-react';
-import { BuildingPeer, SimulatorNode, SimulatorEdge, UserPose } from '../types/simulator';
-import { findWallFreePath, runAStarBetweenCoordinates } from '../utils/simulatorEngine';
+import {
+  BuildingPeer,
+  SimulatorBeacon,
+  SimulatorNode,
+  SimulatorEdge,
+  UserPose,
+} from '../types/simulator';
+import {
+  findWallFreePath,
+  rssiToDistance,
+  runAStarBetweenCoordinates,
+  simulateRawRssi,
+  solveTrilateration,
+  updateKalman1D,
+} from '../utils/simulatorEngine';
 import {
   AntiShakeStepDetector,
   FLOOR_ROOMS,
@@ -32,6 +50,11 @@ interface CleanNavigationDashboardProps {
 }
 
 type DirectoryTab = 'people' | 'rooms';
+type BleSupportState = 'checking' | 'available' | 'connected' | 'unsupported' | 'denied';
+
+interface TelemetryBeaconSnapshot extends SimulatorBeacon {
+  rawDistance: number;
+}
 
 interface MapCamera {
   scale: number; // pixels per meter
@@ -58,6 +81,49 @@ const ROOM_CODES: Record<string, string> = {
   room_105: '105',
   corr_center: 'ATRIUM',
 };
+
+const BEACON_ANCHORS: Array<{ id: string; name: string; x: number; y: number }> = [
+  { id: 'B1', name: 'NW Concourse', x: 11.2, y: 7.0 },
+  { id: 'B2', name: 'NE Concourse', x: 20.8, y: 7.0 },
+  { id: 'B3', name: 'SW Concourse', x: 11.2, y: 17.0 },
+  { id: 'B4', name: 'SE Concourse', x: 20.8, y: 17.0 },
+];
+
+const SIMULATION_TARGETS: Array<{ kind: 'peer' | 'room'; id: string }> = [
+  { kind: 'peer', id: 'peer_hassaan' },
+  { kind: 'room', id: 'room_101' },
+  { kind: 'peer', id: 'peer_marcus' },
+  { kind: 'room', id: 'room_103' },
+  { kind: 'room', id: 'room_105' },
+];
+
+function createInitialBeacons(poseX: number, poseY: number): TelemetryBeaconSnapshot[] {
+  return BEACON_ANCHORS.map((anchor) => {
+    const dist = Math.max(0.5, Math.hypot(anchor.x - poseX, anchor.y - poseY));
+    const txPower = -59;
+    const pathLossN = 2.2;
+    const expectedRssi = Number((txPower - 10 * pathLossN * Math.log10(dist)).toFixed(1));
+    return {
+      id: anchor.id,
+      name: anchor.name,
+      x: anchor.x,
+      y: anchor.y,
+      floor: 1,
+      txPower,
+      pathLossN,
+      currentRawRssi: expectedRssi,
+      filteredRssi: expectedRssi,
+      estimatedDistance: Number(dist.toFixed(2)),
+      rawDistance: Number(dist.toFixed(2)),
+      kalmanState: {
+        q: 0.08,
+        r: 2.4,
+        p: 1.0,
+        x: expectedRssi,
+      },
+    };
+  });
+}
 
 export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> = ({
   currentUser,
@@ -226,10 +292,52 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
   const [directoryTab, setDirectoryTab] = useState<DirectoryTab>('people');
   const [directorySearch, setDirectorySearch] = useState('');
 
-  // Motion sensors state
+  // Motion sensors, Live Simulation & Telemetry HUD state
   const [motionSensorsActive, setMotionSensorsActive] = useState(false);
   const [sensorStatusMessage, setSensorStatusMessage] = useState<string>('Enable Motion');
   const [pulseAnim, setPulseAnim] = useState(0);
+
+  const [isSimulating, setIsSimulating] = useState(false);
+  const [isTelemetryOpen, setIsTelemetryOpen] = useState(false);
+  const [bleState, setBleState] = useState<BleSupportState>('checking');
+  const [bleDeviceName, setBleDeviceName] = useState<string | null>(null);
+  const [bleSuggestionDismissed, setBleSuggestionDismissed] = useState(false);
+
+  const [beacons, setBeacons] = useState<TelemetryBeaconSnapshot[]>(() =>
+    createInitialBeacons(16.0, 12.5)
+  );
+  const [rawTrilatPose, setRawTrilatPose] = useState<{ x: number; y: number } | null>(null);
+  const [kalmanTrilatPose, setKalmanTrilatPose] = useState<{ x: number; y: number } | null>(null);
+  const [rawJitterError, setRawJitterError] = useState<number>(0);
+  const [kalmanError, setKalmanError] = useState<number>(0);
+
+  const userPoseRef = useRef<UserPose>(userPose);
+  const beaconsRef = useRef<TelemetryBeaconSnapshot[]>(beacons);
+  const activeRouteRef = useRef<ReturnType<typeof runAStarBetweenCoordinates>>(null);
+  const activeTargetRef = useRef<{
+    id: string;
+    name: string;
+    subtext: string;
+    coords: { x: number; y: number };
+    isPeer: boolean;
+  } | null>(null);
+  const simRuntimeRef = useRef<{
+    strideAccumMeters: number;
+    dwellTicks: number;
+    routeCycleIndex: number;
+  }>({
+    strideAccumMeters: 0,
+    dwellTicks: 0,
+    routeCycleIndex: 0,
+  });
+
+  useEffect(() => {
+    userPoseRef.current = userPose;
+  }, [userPose]);
+
+  useEffect(() => {
+    beaconsRef.current = beacons;
+  }, [beacons]);
 
   // Compute camera that fits the entire Floor 1 neatly inside any viewport (portrait phone or wide desktop)
   const computeFitCamera = useCallback((w: number, h: number): MapCamera => {
@@ -305,17 +413,33 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
     return () => observer.disconnect();
   }, [computeFitCamera]);
 
-  // Close mobile sheet on Escape
+  // Detect Web Bluetooth availability for evaluator auto-suggestion & hardware BLE support
   useEffect(() => {
-    if (!isMobileSheetOpen) return;
+    const nav =
+      typeof navigator !== 'undefined'
+        ? (navigator as Navigator & {
+            bluetooth?: { requestDevice: (opts: { acceptAllDevices: boolean }) => Promise<{ name?: string }> };
+          })
+        : null;
+    if (nav && 'bluetooth' in nav && nav.bluetooth) {
+      setBleState('available');
+    } else {
+      setBleState('unsupported');
+    }
+  }, []);
+
+  // Close mobile sheet or telemetry drawer on Escape
+  useEffect(() => {
+    if (!isMobileSheetOpen && !isTelemetryOpen) return;
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         setIsMobileSheetOpen(false);
+        setIsTelemetryOpen(false);
       }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [isMobileSheetOpen]);
+  }, [isMobileSheetOpen, isTelemetryOpen]);
 
   // Step Forward immediately along live headingRef direction
   const stepForward = useCallback((stepLength = 0.7) => {
@@ -433,6 +557,208 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
     if (!q) return roomDestinations;
     return roomDestinations.filter((r) => r.label.toLowerCase().includes(q));
   }, [roomDestinations, directorySearch]);
+
+  useEffect(() => {
+    activeRouteRef.current = activeRoute;
+  }, [activeRoute]);
+
+  useEffect(() => {
+    activeTargetRef.current = activeTarget;
+  }, [activeTarget]);
+
+  const toggleLiveSimulation = useCallback(() => {
+    setIsSimulating((prev) => {
+      const next = !prev;
+      if (next) {
+        setBleSuggestionDismissed(true);
+        simRuntimeRef.current.dwellTicks = 0;
+        simRuntimeRef.current.strideAccumMeters = 0;
+        if (!targetPeerId && !targetRoomId) {
+          setTargetPeerId('peer_hassaan');
+        }
+      } else {
+        setRawTrilatPose(null);
+        setKalmanTrilatPose(null);
+      }
+      return next;
+    });
+  }, [targetPeerId, targetRoomId]);
+
+  const connectHardwareBle = useCallback(async () => {
+    const nav =
+      typeof navigator !== 'undefined'
+        ? (navigator as Navigator & {
+            bluetooth?: { requestDevice: (opts: { acceptAllDevices: boolean }) => Promise<{ name?: string }> };
+          })
+        : null;
+    if (!nav?.bluetooth) {
+      setBleState('unsupported');
+      setBleSuggestionDismissed(false);
+      return;
+    }
+    try {
+      const device = await nav.bluetooth.requestDevice({ acceptAllDevices: true });
+      setBleDeviceName(device?.name || 'BLE Beacon');
+      setBleState('connected');
+      setIsSimulating(false);
+      setBleSuggestionDismissed(true);
+    } catch {
+      setBleState('denied');
+      setBleSuggestionDismissed(false);
+    }
+  }, []);
+
+  // Evaluator Live Simulation Mode loop:
+  // Walks along the active A* route, updates PDR steps/heading, synthesizes noisy RSSI across 4 BLE beacons,
+  // runs 1D Kalman filtering + 2D trilateration to compare raw jitter vs smoothed position.
+  useEffect(() => {
+    if (!isSimulating) return;
+
+    const runSimTick = () => {
+      const curPose = userPoseRef.current;
+      let nextX = curPose.x;
+      let nextY = curPose.y;
+      let nextHeading = curPose.heading;
+      let addedSteps = 0;
+      let addedMeters = 0;
+
+      const route = activeRouteRef.current;
+      const target = activeTargetRef.current;
+
+      if (!target) {
+        const pick = SIMULATION_TARGETS[simRuntimeRef.current.routeCycleIndex % SIMULATION_TARGETS.length];
+        if (pick.kind === 'peer') {
+          setTargetPeerId(pick.id);
+          setTargetRoomId(null);
+        } else {
+          setTargetRoomId(pick.id);
+          setTargetPeerId(null);
+        }
+      } else if (route && route.pathCoordinates.length >= 2) {
+        const distToGoal = Math.hypot(target.coords.x - curPose.x, target.coords.y - curPose.y);
+        if (distToGoal < 1.1) {
+          simRuntimeRef.current.dwellTicks += 1;
+          if (simRuntimeRef.current.dwellTicks >= 4) {
+            simRuntimeRef.current.dwellTicks = 0;
+            simRuntimeRef.current.routeCycleIndex =
+              (simRuntimeRef.current.routeCycleIndex + 1) % SIMULATION_TARGETS.length;
+            const nextPick = SIMULATION_TARGETS[simRuntimeRef.current.routeCycleIndex];
+            if (nextPick.kind === 'peer') {
+              setTargetPeerId(nextPick.id);
+              setTargetRoomId(null);
+            } else {
+              setTargetRoomId(nextPick.id);
+              setTargetPeerId(null);
+            }
+          }
+        } else {
+          simRuntimeRef.current.dwellTicks = 0;
+          const coords = route.pathCoordinates;
+          let wp = coords[coords.length - 1];
+          for (let i = 1; i < coords.length; i++) {
+            if (Math.hypot(coords[i].x - curPose.x, coords[i].y - curPose.y) > 0.18) {
+              wp = coords[i];
+              break;
+            }
+          }
+
+          const dx = wp.x - curPose.x;
+          const dy = wp.y - curPose.y;
+          const segDist = Math.hypot(dx, dy);
+          if (segDist > 0.02) {
+            const moveStep = Math.min(0.44, segDist);
+            const resolved = resolveWallCollision(
+              curPose.x,
+              curPose.y,
+              (dx / segDist) * moveStep,
+              (dy / segDist) * moveStep
+            );
+            const moved = Math.hypot(resolved.x - curPose.x, resolved.y - curPose.y);
+            if (moved > 0.01) {
+              nextX = resolved.x;
+              nextY = resolved.y;
+              addedMeters = moved;
+              simRuntimeRef.current.strideAccumMeters += moved;
+              while (simRuntimeRef.current.strideAccumMeters >= 0.68) {
+                addedSteps += 1;
+                simRuntimeRef.current.strideAccumMeters -= 0.68;
+              }
+            }
+            const angleDeg = Math.round(((Math.atan2(dy, dx) * 180) / Math.PI + 90 + 360) % 360);
+            nextHeading = angleDeg;
+            headingRef.current = angleDeg;
+          }
+        }
+      }
+
+      if (addedMeters > 0 || addedSteps > 0 || nextHeading !== curPose.heading) {
+        setUserPose((prev) => ({
+          ...prev,
+          x: nextX,
+          y: nextY,
+          heading: nextHeading,
+          stepCount: prev.stepCount + addedSteps,
+          totalDistanceMeters: Number((prev.totalDistanceMeters + addedMeters).toFixed(1)),
+          accuracy: 0.75,
+        }));
+      }
+
+      // Generate synthetic BLE RSSI with Gaussian noise & pass through 1D Kalman Filter
+      const nextBeacons: TelemetryBeaconSnapshot[] = beaconsRef.current.map((b) => {
+        const trueDist = Math.max(0.2, Math.hypot(b.x - nextX, b.y - nextY));
+        const rawRssi = simulateRawRssi(trueDist, b.txPower, b.pathLossN, 2.8);
+        const kalmanOut = updateKalman1D(b.kalmanState, rawRssi);
+        const rawDist = rssiToDistance(rawRssi, b.txPower, b.pathLossN);
+        const filteredDist = rssiToDistance(kalmanOut.x, b.txPower, b.pathLossN);
+        return {
+          ...b,
+          currentRawRssi: Number(rawRssi.toFixed(1)),
+          filteredRssi: Number(kalmanOut.x.toFixed(1)),
+          rawDistance: Number(rawDist.toFixed(2)),
+          estimatedDistance: Number(filteredDist.toFixed(2)),
+          kalmanState: {
+            q: kalmanOut.q,
+            r: kalmanOut.r,
+            p: kalmanOut.p,
+            x: kalmanOut.x,
+          },
+        };
+      });
+
+      setBeacons(nextBeacons);
+
+      const nearestThree = [...nextBeacons]
+        .sort((a, b) => a.estimatedDistance - b.estimatedDistance)
+        .slice(0, 3);
+
+      const kalmanSolved = solveTrilateration(nearestThree);
+      const rawSolved = solveTrilateration(
+        nearestThree.map((b) => ({ ...b, estimatedDistance: b.rawDistance }))
+      );
+
+      if (kalmanSolved) {
+        const clampedK = {
+          x: Math.max(WORLD_BOUNDS.minX, Math.min(WORLD_BOUNDS.maxX, kalmanSolved.x)),
+          y: Math.max(WORLD_BOUNDS.minY, Math.min(WORLD_BOUNDS.maxY, kalmanSolved.y)),
+        };
+        setKalmanTrilatPose(clampedK);
+        setKalmanError(Number(Math.hypot(clampedK.x - nextX, clampedK.y - nextY).toFixed(2)));
+      }
+
+      if (rawSolved) {
+        const clampedR = {
+          x: Math.max(WORLD_BOUNDS.minX - 1.5, Math.min(WORLD_BOUNDS.maxX + 1.5, rawSolved.x)),
+          y: Math.max(WORLD_BOUNDS.minY - 1.5, Math.min(WORLD_BOUNDS.maxY + 1.5, rawSolved.y)),
+        };
+        setRawTrilatPose(clampedR);
+        setRawJitterError(Number(Math.hypot(clampedR.x - nextX, clampedR.y - nextY).toFixed(2)));
+      }
+    };
+
+    runSimTick();
+    const timer = window.setInterval(runSimTick, 380);
+    return () => window.clearInterval(timer);
+  }, [isSimulating]);
 
   useEffect(() => {
     let frame: number;
@@ -1111,6 +1437,70 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
       }
     });
 
+    // 6.5 Virtual BLE Beacons + Raw Jitter vs. 1D Kalman Trilateration Overlay
+    if (isSimulating || isTelemetryOpen) {
+      beacons.forEach((b) => {
+        const bxPos = wx(b.x);
+        const byPos = wy(b.y);
+        const dSize = Math.max(4.5, scale * 0.18);
+
+        ctx.fillStyle = '#0B0F17';
+        ctx.strokeStyle = 'rgba(56, 189, 248, 0.72)';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(bxPos, byPos - dSize);
+        ctx.lineTo(bxPos + dSize, byPos);
+        ctx.lineTo(bxPos, byPos + dSize);
+        ctx.lineTo(bxPos - dSize, byPos);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+
+        if (scale >= 12) {
+          ctx.fillStyle = 'rgba(125, 211, 252, 0.85)';
+          ctx.font = '600 9.5px "JetBrains Mono", monospace';
+          ctx.fillText(b.id, bxPos + dSize + 4, byPos + 3.5);
+        }
+      });
+    }
+
+    if (isSimulating && rawTrilatPose && kalmanTrilatPose) {
+      const rxRaw = wx(rawTrilatPose.x);
+      const ryRaw = wy(rawTrilatPose.y);
+      const kxEst = wx(kalmanTrilatPose.x);
+      const kyEst = wy(kalmanTrilatPose.y);
+
+      // Jitter vector from noisy raw RSSI solution to Kalman-smoothed estimate
+      ctx.strokeStyle = 'rgba(251, 146, 60, 0.45)';
+      ctx.lineWidth = 1.25;
+      ctx.setLineDash([3, 3]);
+      ctx.beginPath();
+      ctx.moveTo(rxRaw, ryRaw);
+      ctx.lineTo(kxEst, kyEst);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // Raw noisy BLE marker (amber cross/ring)
+      ctx.strokeStyle = 'rgba(251, 146, 60, 0.9)';
+      ctx.lineWidth = 1.6;
+      ctx.beginPath();
+      ctx.arc(rxRaw, ryRaw, 4.5, 0, Math.PI * 2);
+      ctx.moveTo(rxRaw - 6, ryRaw);
+      ctx.lineTo(rxRaw + 6, ryRaw);
+      ctx.moveTo(rxRaw, ryRaw - 6);
+      ctx.lineTo(rxRaw, ryRaw + 6);
+      ctx.stroke();
+
+      // Kalman-smoothed BLE trilateration ring
+      ctx.strokeStyle = 'rgba(34, 211, 238, 0.85)';
+      ctx.lineWidth = 1.6;
+      ctx.setLineDash([4, 3]);
+      ctx.beginPath();
+      ctx.arc(kxEst, kyEst, 11, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
     // 7. Current User Position Beacon & Heading Cone
     const ux = wx(userPose.x);
     const uy = wy(userPose.y);
@@ -1179,6 +1569,11 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
     targetRoomId,
     activeTarget,
     pulseAnim,
+    isSimulating,
+    isTelemetryOpen,
+    beacons,
+    rawTrilatPose,
+    kalmanTrilatPose,
   ]);
 
   // Select peer or room from canvas screen tap coordinates
@@ -1315,6 +1710,18 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
   };
 
   const firstName = currentUser.name.trim().split(/\s+/)[0] || 'Navigator';
+  const onlinePeersCount = peers.filter((p) => p.isOnline).length;
+  const positioningMode: 'Simulation' | 'Hardware BLE' | 'PDR Sensors' = isSimulating
+    ? 'Simulation'
+    : bleState === 'connected'
+      ? 'Hardware BLE'
+      : 'PDR Sensors';
+  const routeEtaSeconds = Math.max(1, Math.round(remainingDistanceMeters / 1.1));
+  const showBleAutoSuggestion =
+    !isSimulating &&
+    bleState !== 'connected' &&
+    !bleSuggestionDismissed &&
+    (bleState === 'unsupported' || bleState === 'denied');
 
   // Reusable Directory List Content (shared between Desktop Left Sidebar & Mobile Bottom Sheet)
   const renderDirectoryList = (isMobileSheet: boolean) => (
@@ -1331,7 +1738,7 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
             onChange={(e) => setDirectorySearch(e.target.value)}
             placeholder="Search people or rooms..."
             aria-label="Search people or rooms"
-            className="w-full min-h-[42px] bg-[#0D121D] border border-white/[0.08] focus:border-sky-400 rounded-xl pl-10 pr-3.5 py-2 text-xs text-white placeholder:text-slate-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
+            className="w-full min-h-[44px] bg-[#0D121D] border border-white/[0.08] focus:border-sky-400 rounded-xl pl-10 pr-3.5 py-2 text-xs text-white placeholder:text-slate-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
           />
         </div>
 
@@ -1345,7 +1752,7 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
             role="tab"
             aria-selected={directoryTab === 'people'}
             onClick={() => setDirectoryTab('people')}
-            className={`min-h-[38px] rounded-lg text-xs font-semibold transition-colors ${
+            className={`min-h-[44px] rounded-lg text-xs font-semibold transition-colors ${
               directoryTab === 'people'
                 ? 'bg-sky-400 text-slate-950'
                 : 'text-slate-400 hover:text-white'
@@ -1358,7 +1765,7 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
             role="tab"
             aria-selected={directoryTab === 'rooms'}
             onClick={() => setDirectoryTab('rooms')}
-            className={`min-h-[38px] rounded-lg text-xs font-semibold transition-colors ${
+            className={`min-h-[44px] rounded-lg text-xs font-semibold transition-colors ${
               directoryTab === 'rooms'
                 ? 'bg-sky-400 text-slate-950'
                 : 'text-slate-400 hover:text-white'
@@ -1495,7 +1902,7 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
   );
 
   return (
-    <div className="h-[100dvh] w-full bg-[#0B0F17] text-slate-100 flex flex-col lg:flex-row font-sans select-none overflow-hidden">
+    <div className="h-[100dvh] w-full bg-[#0B0F17] text-slate-100 flex flex-col lg:flex-row font-sans select-none overflow-hidden overflow-x-hidden">
       {/* DESKTOP LEFT WORKSPACE SIDEBAR (lg+) */}
       <aside className="hidden lg:flex lg:w-[340px] lg:shrink-0 flex-col bg-[#111622] border-r border-white/[0.08] p-5 z-20">
         {/* Brand Header */}
@@ -1506,11 +1913,9 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
             </div>
           </div>
           <div className="min-w-0">
-            <h1 className="text-sm font-bold text-white tracking-tight truncate">
-              Indoor Navigation
-            </h1>
-            <p className="text-xs text-slate-400">
-              Floor 1 <span aria-hidden="true">·</span> {peers.length} active peers
+            <h1 className="text-sm font-bold text-white tracking-tight truncate">IndoorNav</h1>
+            <p className="text-xs text-slate-400 font-mono tabular-nums">
+              Floor 1 <span aria-hidden="true">·</span> {onlinePeersCount} active peers
             </p>
           </div>
         </div>
@@ -1526,7 +1931,7 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
             </div>
             <div className="min-w-0">
               <div className="text-xs font-semibold text-white truncate">
-                Good morning, {firstName}
+                Welcome, {firstName}
               </div>
               <div className="text-[11px] text-slate-400 truncate">{currentUser.role}</div>
             </div>
@@ -1535,7 +1940,7 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
           <button
             type="button"
             onClick={onSignOut}
-            className="min-h-[38px] px-3 rounded-lg text-xs font-medium text-slate-300 hover:text-white bg-[#0D121D] hover:bg-slate-800 border border-white/[0.08] transition-colors flex items-center gap-1.5 shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
+            className="min-h-[44px] px-3 rounded-xl text-xs font-medium text-slate-300 hover:text-white bg-[#0D121D] hover:bg-slate-800 border border-white/[0.08] transition-colors flex items-center gap-1.5 shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
             title="Sign Out"
             aria-label="Sign out"
           >
@@ -1546,19 +1951,17 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
       </aside>
 
       {/* MOBILE COMPACT TOP BAR (< lg) */}
-      <header className="lg:hidden h-14 px-3.5 bg-[#111622]/95 border-b border-white/[0.08] backdrop-blur-md flex items-center justify-between gap-2 shrink-0 z-30">
-        <div className="flex items-center gap-2.5 min-w-0">
+      <header className="lg:hidden min-h-[56px] px-3 py-1.5 bg-[#111622]/95 border-b border-white/[0.08] backdrop-blur-md flex items-center justify-between gap-1.5 shrink-0 z-30">
+        <div className="flex items-center gap-2 min-w-0">
           <div className="w-8 h-8 rounded-lg bg-gradient-to-tr from-sky-400 to-blue-500 p-[1.5px] shrink-0">
             <div className="w-full h-full bg-[#111622] rounded-[6.5px] flex items-center justify-center">
               <Compass className="w-4 h-4 text-sky-400" aria-hidden="true" />
             </div>
           </div>
           <div className="min-w-0">
-            <h1 className="text-sm font-bold text-white tracking-tight truncate">
-              Indoor Navigation
-            </h1>
-            <p className="text-[11px] text-slate-400 leading-none mt-0.5 truncate">
-              Floor 1 <span aria-hidden="true">·</span> {firstName}
+            <h1 className="text-sm font-bold text-white tracking-tight truncate">IndoorNav</h1>
+            <p className="text-[11px] text-slate-400 leading-none mt-0.5 truncate font-mono tabular-nums">
+              F1 <span aria-hidden="true">·</span> {positioningMode === 'Simulation' ? 'Sim' : `${onlinePeersCount} peers`}
             </p>
           </div>
         </div>
@@ -1566,33 +1969,41 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
         <div className="flex items-center gap-1.5 shrink-0">
           <button
             type="button"
-            onClick={requestSensorAccess}
-            className={`min-h-[40px] px-2.5 rounded-lg text-xs font-medium border transition-colors flex items-center gap-1.5 whitespace-nowrap focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 ${
-              motionSensorsActive
-                ? 'bg-emerald-500/12 text-emerald-300 border-emerald-500/35'
+            onClick={toggleLiveSimulation}
+            aria-pressed={isSimulating}
+            className={`min-h-[44px] px-2.5 rounded-xl text-xs font-semibold border transition-colors flex items-center gap-1.5 whitespace-nowrap focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 ${
+              isSimulating
+                ? 'bg-sky-400 text-slate-950 border-sky-300'
+                : 'bg-[#0D121D] text-slate-100 border-white/[0.1] hover:border-white/[0.2]'
+            }`}
+          >
+            {isSimulating ? (
+              <Square className="w-3.5 h-3.5 fill-current shrink-0" aria-hidden="true" />
+            ) : (
+              <Play className="w-3.5 h-3.5 fill-current shrink-0" aria-hidden="true" />
+            )}
+            <span>{isSimulating ? 'Stop Sim' : 'Live Sim'}</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setIsTelemetryOpen((prev) => !prev)}
+            aria-expanded={isTelemetryOpen}
+            aria-label="Toggle telemetry drawer"
+            className={`min-h-[44px] px-2.5 rounded-xl text-xs font-medium border transition-colors flex items-center gap-1.5 whitespace-nowrap focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 ${
+              isTelemetryOpen
+                ? 'bg-white text-slate-950 border-white'
                 : 'bg-[#0D121D] text-slate-200 border-white/[0.1]'
             }`}
           >
-            <Smartphone className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
-            <span>{motionSensorsActive ? 'Motion' : 'Sensors'}</span>
+            <Activity className="w-4 h-4 shrink-0" aria-hidden="true" />
+            <span className="hidden sm:inline">Telemetry</span>
           </button>
-
-          {motionSensorsActive && (
-            <button
-              type="button"
-              onClick={alignPhoneHeadingToMap}
-              className="min-h-[40px] px-2.5 rounded-lg text-xs font-medium bg-[#0D121D] text-sky-300 border border-white/[0.1] transition-colors flex items-center gap-1 whitespace-nowrap focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
-              aria-label="Align compass heading to map north"
-            >
-              <Compass className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
-              <span>Align</span>
-            </button>
-          )}
 
           <button
             type="button"
             onClick={onSignOut}
-            className="w-10 h-10 rounded-lg text-slate-300 hover:text-white hover:bg-slate-800/80 flex items-center justify-center transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
+            className="w-11 h-11 rounded-xl text-slate-300 hover:text-white hover:bg-slate-800/80 border border-transparent hover:border-white/[0.08] flex items-center justify-center transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
             aria-label="Sign out"
             title="Sign Out"
           >
@@ -1621,43 +2032,125 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
           className="block w-full h-full cursor-grab active:cursor-grabbing touch-none"
         />
 
-        {/* Desktop Floating Sensor Controls (Top-Left of Map) */}
-        <div className="hidden lg:flex items-center gap-2 absolute top-4 left-4 z-20">
+        {/* Mobile Floating Sensor & BLE Controls (Top-Left of Map) */}
+        <div className="lg:hidden flex flex-wrap items-center gap-1.5 absolute top-3 left-3 right-3 z-20 pointer-events-none">
           <button
             type="button"
             onClick={requestSensorAccess}
-            className={`min-h-[40px] flex items-center gap-2 px-3.5 rounded-xl text-xs font-medium border backdrop-blur-md transition-colors whitespace-nowrap focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 ${
+            className={`pointer-events-auto min-h-[44px] px-3 rounded-xl text-xs font-medium border backdrop-blur-md transition-colors flex items-center gap-1.5 whitespace-nowrap focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 ${
               motionSensorsActive
-                ? 'bg-[#111622]/90 text-emerald-300 border-emerald-500/35'
-                : 'bg-[#111622]/90 hover:bg-[#171E2E] text-slate-200 border-white/[0.1]'
+                ? 'bg-[#111622]/92 text-emerald-300 border-emerald-500/35'
+                : 'bg-[#111622]/92 text-slate-200 border-white/[0.1]'
             }`}
-            title="Enable anti-shake walking step detection & compass heading"
           >
             <Smartphone className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
-            <span>{sensorStatusMessage}</span>
+            <span>{motionSensorsActive ? 'Motion Active' : 'Sensors'}</span>
           </button>
 
           {motionSensorsActive && (
             <button
               type="button"
               onClick={alignPhoneHeadingToMap}
-              className="min-h-[40px] flex items-center gap-1.5 px-3.5 rounded-xl text-xs font-medium bg-[#111622]/90 hover:bg-[#171E2E] text-sky-300 border border-white/[0.1] backdrop-blur-md transition-colors whitespace-nowrap focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
-              title="Point your phone toward the top of the map and tap Align"
+              className="pointer-events-auto min-h-[44px] px-3 rounded-xl text-xs font-medium bg-[#111622]/92 text-sky-300 border border-white/[0.1] backdrop-blur-md transition-colors flex items-center gap-1.5 whitespace-nowrap focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
+              aria-label="Align compass heading to map north"
             >
               <Compass className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
-              <span>Align North</span>
+              <span>Align</span>
             </button>
           )}
         </div>
 
-        {/* Desktop Floating Wayfinding Guidance Card (Top-Center of Map) */}
+        {/* Desktop Floating Top Control Bar (Non-overlapping Left + Right groups) */}
+        <div className="hidden lg:flex items-center justify-between gap-3 absolute top-3.5 inset-x-3.5 z-20 pointer-events-none">
+          <div className="flex items-center gap-2 pointer-events-auto">
+            <button
+              type="button"
+              onClick={toggleLiveSimulation}
+              aria-pressed={isSimulating}
+              className={`min-h-[44px] flex items-center gap-2 px-3.5 rounded-xl text-xs font-semibold border backdrop-blur-md transition-colors whitespace-nowrap focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 ${
+                isSimulating
+                  ? 'bg-sky-400 text-slate-950 border-sky-300 shadow-lg shadow-sky-500/15'
+                  : 'bg-[#111622]/92 hover:bg-[#171E2E] text-white border-white/[0.12]'
+              }`}
+              title="Simulate live walking trajectory, noisy BLE beacons, Kalman filtering & A* navigation"
+            >
+              {isSimulating ? (
+                <Square className="w-3.5 h-3.5 fill-current shrink-0" aria-hidden="true" />
+              ) : (
+                <Play className="w-3.5 h-3.5 fill-current shrink-0" aria-hidden="true" />
+              )}
+              <span>{isSimulating ? 'Stop Live Simulation' : 'Live Simulation Mode'}</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={requestSensorAccess}
+              className={`min-h-[44px] flex items-center gap-2 px-3.5 rounded-xl text-xs font-medium border backdrop-blur-md transition-colors whitespace-nowrap focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 ${
+                motionSensorsActive
+                  ? 'bg-[#111622]/90 text-emerald-300 border-emerald-500/35'
+                  : 'bg-[#111622]/90 hover:bg-[#171E2E] text-slate-200 border-white/[0.1]'
+              }`}
+              title="Enable anti-shake walking step detection & compass heading"
+            >
+              <Smartphone className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+              <span>{sensorStatusMessage}</span>
+            </button>
+
+            {motionSensorsActive && (
+              <button
+                type="button"
+                onClick={alignPhoneHeadingToMap}
+                className="min-h-[44px] flex items-center gap-1.5 px-3.5 rounded-xl text-xs font-medium bg-[#111622]/90 hover:bg-[#171E2E] text-sky-300 border border-white/[0.1] backdrop-blur-md transition-colors whitespace-nowrap focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
+                title="Point your phone toward the top of the map and tap Align"
+              >
+                <Compass className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                <span>Align North</span>
+              </button>
+            )}
+
+            {bleState === 'available' && (
+              <button
+                type="button"
+                onClick={connectHardwareBle}
+                className="min-h-[44px] flex items-center gap-1.5 px-3.5 rounded-xl text-xs font-medium bg-[#111622]/90 hover:bg-[#171E2E] text-slate-200 border border-white/[0.1] backdrop-blur-md transition-colors whitespace-nowrap focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
+                title="Scan physical BLE beacon hardware via Web Bluetooth"
+              >
+                <Bluetooth className="w-3.5 h-3.5 text-sky-400 shrink-0" aria-hidden="true" />
+                <span>Pair BLE</span>
+              </button>
+            )}
+          </div>
+
+          <button
+            type="button"
+            onClick={() => setIsTelemetryOpen((prev) => !prev)}
+            aria-expanded={isTelemetryOpen}
+            className={`pointer-events-auto min-h-[44px] flex items-center gap-2 px-3.5 rounded-xl text-xs font-medium border backdrop-blur-md transition-colors whitespace-nowrap focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 ${
+              isTelemetryOpen
+                ? 'bg-white text-slate-950 border-white'
+                : 'bg-[#111622]/92 hover:bg-[#171E2E] text-slate-100 border-white/[0.1]'
+            }`}
+          >
+            <Activity className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+            <span>Telemetry</span>
+            <span
+              className={`font-mono text-[11px] ${
+                isTelemetryOpen ? 'text-slate-600' : 'text-sky-400'
+              }`}
+            >
+              {positioningMode}
+            </span>
+          </button>
+        </div>
+
+        {/* Desktop Floating Wayfinding Guidance Card (Anchored cleanly below Top-Left controls) */}
         {activeTarget && (
-          <div className="hidden lg:block absolute top-4 left-1/2 -translate-x-1/2 w-[calc(100%-24rem)] min-w-[360px] max-w-lg z-20 animate-fade-in">
+          <div className="hidden lg:block absolute top-[68px] left-3.5 w-[348px] z-20 animate-fade-in">
             <div
-              className={`border rounded-2xl px-4 py-3 shadow-2xl backdrop-blur-xl flex items-center justify-between gap-4 transition-colors ${
+              className={`border rounded-2xl px-4 py-3 shadow-2xl backdrop-blur-xl flex items-center justify-between gap-3 transition-colors ${
                 hasArrived
                   ? 'bg-emerald-950/92 border-emerald-500/50'
-                  : 'bg-[#111622]/92 border-white/[0.12]'
+                  : 'bg-[#111622]/92 border-white/[0.1]'
               }`}
             >
               <div className="flex items-center gap-3 min-w-0">
@@ -1694,19 +2187,19 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
                     <span>
                       {hasArrived
                         ? 'At target location'
-                        : `~${Math.max(1, Math.round(remainingDistanceMeters / 1.1))}s walk · ${userPose.stepCount} steps`}
+                        : `~${routeEtaSeconds}s walk · ${userPose.stepCount} steps`}
                     </span>
                   </div>
                 </div>
               </div>
 
-              <div className="flex items-center gap-3 shrink-0">
+              <div className="flex items-center gap-2.5 shrink-0">
                 {!hasArrived && (
                   <div className="text-right">
-                    <div className="text-base font-bold font-mono tabular-nums text-white leading-none">
+                    <div className="text-sm font-bold font-mono tabular-nums text-white leading-none">
                       {remainingDistanceMeters.toFixed(1)} m
                     </div>
-                    <div className="text-[10px] text-slate-400 mt-1">Remaining</div>
+                    <div className="text-[10px] text-slate-400 mt-1">A* dist</div>
                   </div>
                 )}
 
@@ -1716,7 +2209,7 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
                     setTargetPeerId(null);
                     setTargetRoomId(null);
                   }}
-                  className="min-h-[38px] px-3 py-1.5 rounded-xl text-xs font-semibold bg-[#1A2233] hover:bg-slate-800 text-slate-200 border border-white/[0.08] transition-colors whitespace-nowrap focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
+                  className="min-h-[44px] px-3 rounded-xl text-xs font-semibold bg-[#1A2233] hover:bg-slate-800 text-slate-200 border border-white/[0.08] transition-colors whitespace-nowrap focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
                 >
                   {hasArrived ? 'Done' : 'Cancel'}
                 </button>
@@ -1725,14 +2218,47 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
           </div>
         )}
 
-        {/* Map Camera Controls (Bottom-Right on both Phone & Desktop) */}
+        {/* Auto-Suggested Evaluator Banner when Web Bluetooth is Unavailable or Denied */}
+        {showBleAutoSuggestion && (
+          <div className="absolute bottom-3.5 left-3.5 right-[68px] lg:right-auto lg:left-1/2 lg:-translate-x-1/2 lg:w-[480px] z-20">
+            <div className="bg-[#111622]/94 backdrop-blur-xl border border-white/[0.12] rounded-2xl px-3.5 py-2.5 shadow-2xl flex items-center justify-between gap-2.5">
+              <div className="min-w-0 flex items-center gap-2.5">
+                <Bluetooth className="w-4 h-4 text-sky-400 shrink-0" aria-hidden="true" />
+                <p className="text-xs text-slate-200 leading-snug">
+                  {bleState === 'denied'
+                    ? 'Bluetooth access declined. Run Live Simulation Mode to preview Kalman BLE + PDR.'
+                    : 'Web Bluetooth unavailable. Start Live Simulation Mode to preview Kalman BLE + A*.'}
+                </p>
+              </div>
+              <div className="flex items-center gap-1 shrink-0">
+                <button
+                  type="button"
+                  onClick={toggleLiveSimulation}
+                  className="min-h-[44px] px-3 rounded-xl bg-sky-400 hover:bg-sky-300 text-slate-950 text-xs font-semibold whitespace-nowrap transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
+                >
+                  Start Sim
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setBleSuggestionDismissed(true)}
+                  aria-label="Dismiss Bluetooth suggestion"
+                  className="w-11 h-11 rounded-xl text-slate-400 hover:text-white hover:bg-slate-800/80 flex items-center justify-center transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
+                >
+                  <X className="w-4 h-4" aria-hidden="true" />
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Map Camera Controls (Bottom-Right on both Phone & Desktop — strict 44x44 tap targets) */}
         <div className="absolute bottom-3.5 right-3.5 z-20 flex flex-col gap-1.5">
           <button
             type="button"
             onClick={() => zoomBy(1.25)}
             aria-label="Zoom in"
             title="Zoom in"
-            className="w-10 h-10 rounded-xl bg-[#111622]/90 hover:bg-[#171E2E] border border-white/[0.1] backdrop-blur-md text-slate-200 flex items-center justify-center transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
+            className="w-11 h-11 rounded-xl bg-[#111622]/90 hover:bg-[#171E2E] border border-white/[0.1] backdrop-blur-md text-slate-200 flex items-center justify-center transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
           >
             <Plus className="w-4 h-4" aria-hidden="true" />
           </button>
@@ -1741,7 +2267,7 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
             onClick={() => zoomBy(0.8)}
             aria-label="Zoom out"
             title="Zoom out"
-            className="w-10 h-10 rounded-xl bg-[#111622]/90 hover:bg-[#171E2E] border border-white/[0.1] backdrop-blur-md text-slate-200 flex items-center justify-center transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
+            className="w-11 h-11 rounded-xl bg-[#111622]/90 hover:bg-[#171E2E] border border-white/[0.1] backdrop-blur-md text-slate-200 flex items-center justify-center transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
           >
             <Minus className="w-4 h-4" aria-hidden="true" />
           </button>
@@ -1750,7 +2276,7 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
             onClick={centerOnUser}
             aria-label="Center on my location"
             title="Center on my location"
-            className="w-10 h-10 rounded-xl bg-[#111622]/90 hover:bg-[#171E2E] border border-white/[0.1] backdrop-blur-md text-sky-400 flex items-center justify-center transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
+            className="w-11 h-11 rounded-xl bg-[#111622]/90 hover:bg-[#171E2E] border border-white/[0.1] backdrop-blur-md text-sky-400 flex items-center justify-center transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
           >
             <LocateFixed className="w-4 h-4" aria-hidden="true" />
           </button>
@@ -1759,32 +2285,241 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
             onClick={fitFloorPlan}
             aria-label="Fit entire floor plan"
             title="Fit floor plan"
-            className="w-10 h-10 rounded-xl bg-[#111622]/90 hover:bg-[#171E2E] border border-white/[0.1] backdrop-blur-md text-slate-300 flex items-center justify-center transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
+            className="w-11 h-11 rounded-xl bg-[#111622]/90 hover:bg-[#171E2E] border border-white/[0.1] backdrop-blur-md text-slate-300 flex items-center justify-center transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
           >
             <Maximize2 className="w-4 h-4" aria-hidden="true" />
           </button>
         </div>
 
-        {/* Desktop Subtle Telemetry Pill-Free Strip */}
-        <div className="hidden lg:flex items-center gap-2.5 absolute bottom-3.5 left-1/2 -translate-x-1/2 px-3 py-1.5 rounded-xl bg-[#111622]/85 border border-white/[0.08] backdrop-blur-md text-[11px] text-slate-400 pointer-events-none">
-          <span className="font-mono tabular-nums text-slate-200">
-            HDG {String(userPose.heading).padStart(3, '0')}°
-          </span>
-          <span aria-hidden="true">·</span>
-          <span className="font-mono tabular-nums">{userPose.stepCount} steps</span>
-          <span aria-hidden="true">·</span>
-          <span>Drag to pan, pinch or scroll to zoom</span>
-        </div>
+        {/* Desktop Subtle Telemetry Strip (Hidden when auto-suggestion banner is visible) */}
+        {!showBleAutoSuggestion && (
+          <div className="hidden lg:flex items-center gap-2.5 absolute bottom-3.5 left-1/2 -translate-x-1/2 px-3 py-1.5 rounded-xl bg-[#111622]/85 border border-white/[0.08] backdrop-blur-md text-[11px] text-slate-400 pointer-events-none">
+            <span className="font-mono tabular-nums text-slate-200">
+              HDG {String(userPose.heading).padStart(3, '0')}°
+            </span>
+            <span aria-hidden="true">·</span>
+            <span className="font-mono tabular-nums">{userPose.stepCount} steps</span>
+            <span aria-hidden="true">·</span>
+            <span className="font-mono tabular-nums">
+              {isSimulating ? `Kalman ±${kalmanError.toFixed(1)}m` : `${onlinePeersCount} peers`}
+            </span>
+          </div>
+        )}
       </main>
 
+      {/* COLLAPSIBLE MINIMALIST TELEMETRY DRAWER / HUD */}
+      {isTelemetryOpen && (
+        <>
+          <div
+            onClick={() => setIsTelemetryOpen(false)}
+            className="fixed inset-0 z-40 bg-black/45 backdrop-blur-[1px] lg:bg-transparent lg:backdrop-blur-none"
+            aria-hidden="true"
+          />
+          <aside
+            role="dialog"
+            aria-modal="false"
+            aria-label="Live Positioning Telemetry"
+            className="fixed inset-y-0 right-0 z-50 w-full max-w-[348px] h-[100dvh] bg-[#111622]/98 backdrop-blur-xl border-l border-white/[0.08] shadow-2xl flex flex-col"
+          >
+            <div className="px-4 py-3.5 border-b border-white/[0.08] flex items-center justify-between gap-3 shrink-0">
+              <div>
+                <h2 className="text-sm font-bold text-white tracking-tight">Live Telemetry</h2>
+                <p className="text-[11px] text-slate-400 mt-0.5 font-mono">
+                  Kalman BLE <span aria-hidden="true">·</span> PDR <span aria-hidden="true">·</span> A*
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsTelemetryOpen(false)}
+                aria-label="Close telemetry drawer"
+                className="w-11 h-11 rounded-xl text-slate-400 hover:text-white hover:bg-slate-800/80 border border-white/[0.08] flex items-center justify-center transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
+              >
+                <X className="w-4 h-4" aria-hidden="true" />
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-4 space-y-3.5">
+              {/* Positioning Mode Card */}
+              <div className="p-3.5 rounded-xl bg-[#0D121D] border border-white/[0.08] space-y-2.5">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="text-slate-400">Positioning Mode</span>
+                  <span
+                    className={`font-mono font-semibold ${
+                      positioningMode === 'Simulation'
+                        ? 'text-sky-400'
+                        : positioningMode === 'Hardware BLE'
+                          ? 'text-emerald-400'
+                          : 'text-slate-200'
+                    }`}
+                  >
+                    {positioningMode}
+                  </span>
+                </div>
+                {bleDeviceName && (
+                  <div className="flex items-center justify-between text-[11px] text-slate-400">
+                    <span>BLE Device</span>
+                    <span className="font-mono text-slate-200 truncate max-w-[160px]">
+                      {bleDeviceName}
+                    </span>
+                  </div>
+                )}
+                <div className="flex items-center gap-2 pt-0.5">
+                  <button
+                    type="button"
+                    onClick={toggleLiveSimulation}
+                    className={`flex-1 min-h-[44px] px-3 rounded-xl text-xs font-semibold border transition-colors flex items-center justify-center gap-1.5 ${
+                      isSimulating
+                        ? 'bg-sky-400 text-slate-950 border-sky-300'
+                        : 'bg-[#141B2B] hover:bg-[#1B2438] text-white border-white/[0.1]'
+                    }`}
+                  >
+                    {isSimulating ? (
+                      <Square className="w-3.5 h-3.5 fill-current" aria-hidden="true" />
+                    ) : (
+                      <Play className="w-3.5 h-3.5 fill-current" aria-hidden="true" />
+                    )}
+                    <span>{isSimulating ? 'Stop Simulation' : 'Run Simulation'}</span>
+                  </button>
+
+                  {bleState === 'available' || bleState === 'denied' ? (
+                    <button
+                      type="button"
+                      onClick={connectHardwareBle}
+                      className="min-h-[44px] px-3 rounded-xl text-xs font-medium bg-[#141B2B] hover:bg-[#1B2438] text-slate-200 border border-white/[0.1] flex items-center gap-1.5"
+                    >
+                      <Bluetooth className="w-3.5 h-3.5 text-sky-400" aria-hidden="true" />
+                      <span>BLE</span>
+                    </button>
+                  ) : null}
+                </div>
+              </div>
+
+              {/* PDR Metrics */}
+              <div className="p-3.5 rounded-xl bg-[#0D121D] border border-white/[0.08]">
+                <div className="text-[11px] uppercase tracking-wider text-slate-400 font-semibold mb-2.5">
+                  PDR Inertial Fusion
+                </div>
+                <div className="grid grid-cols-3 gap-2 text-center">
+                  <div className="p-2 rounded-lg bg-[#111622] border border-white/[0.06]">
+                    <div className="text-[10px] text-slate-400">Steps</div>
+                    <div className="text-sm font-mono tabular-nums font-bold text-white mt-0.5">
+                      {userPose.stepCount}
+                    </div>
+                  </div>
+                  <div className="p-2 rounded-lg bg-[#111622] border border-white/[0.06]">
+                    <div className="text-[10px] text-slate-400">Heading</div>
+                    <div className="text-sm font-mono tabular-nums font-bold text-sky-400 mt-0.5">
+                      {String(userPose.heading).padStart(3, '0')}°
+                    </div>
+                  </div>
+                  <div className="p-2 rounded-lg bg-[#111622] border border-white/[0.06]">
+                    <div className="text-[10px] text-slate-400">Walked</div>
+                    <div className="text-sm font-mono tabular-nums font-bold text-white mt-0.5">
+                      {userPose.totalDistanceMeters.toFixed(1)}m
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Active A* Route Metrics */}
+              <div className="p-3.5 rounded-xl bg-[#0D121D] border border-white/[0.08] space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] uppercase tracking-wider text-slate-400 font-semibold">
+                    A* Floor Route
+                  </span>
+                  <span className="text-xs font-mono tabular-nums text-sky-400">
+                    {activeTarget
+                      ? hasArrived
+                        ? 'Arrived'
+                        : `${remainingDistanceMeters.toFixed(1)}m · ~${routeEtaSeconds}s`
+                      : 'Idle'}
+                  </span>
+                </div>
+                <div className="text-xs text-white font-medium truncate">
+                  {activeTarget ? activeTarget.name : 'Select a peer or room to route'}
+                </div>
+              </div>
+
+              {/* BLE Raw RSSI vs 1D Kalman Distance */}
+              <div className="p-3.5 rounded-xl bg-[#0D121D] border border-white/[0.08] space-y-2.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] uppercase tracking-wider text-slate-400 font-semibold">
+                    Raw RSSI vs. Kalman
+                  </span>
+                  {isSimulating && (
+                    <span className="text-[11px] font-mono tabular-nums text-slate-300">
+                      <span className="text-amber-400">±{rawJitterError.toFixed(1)}m</span>
+                      <span className="text-slate-500"> → </span>
+                      <span className="text-cyan-400">±{kalmanError.toFixed(1)}m</span>
+                    </span>
+                  )}
+                </div>
+
+                <div className="space-y-1.5">
+                  {beacons.map((b) => (
+                    <div
+                      key={b.id}
+                      className="px-2.5 py-2 rounded-lg bg-[#111622] border border-white/[0.06] flex items-center justify-between text-xs font-mono tabular-nums"
+                    >
+                      <div className="min-w-0">
+                        <span className="font-semibold text-slate-200">{b.id}</span>
+                        <span className="text-slate-500 font-sans text-[11px] ml-1.5">
+                          {b.name}
+                        </span>
+                      </div>
+                      <div className="text-right shrink-0">
+                        <div className="text-[11px]">
+                          <span className="text-amber-400">{b.currentRawRssi.toFixed(0)}dBm</span>
+                          <span className="text-slate-500"> → </span>
+                          <span className="text-cyan-400">{b.filteredRssi.toFixed(0)}dBm</span>
+                        </div>
+                        <div className="text-[10px] text-slate-400">
+                          {b.rawDistance.toFixed(1)}m → {b.estimatedDistance.toFixed(1)}m
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Realtime Peers Status */}
+              <div className="p-3.5 rounded-xl bg-[#0D121D] border border-white/[0.08] space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] uppercase tracking-wider text-slate-400 font-semibold flex items-center gap-1.5">
+                    <Radio className="w-3.5 h-3.5 text-emerald-400" aria-hidden="true" />
+                    <span>Realtime Peers</span>
+                  </span>
+                  <span className="text-xs font-mono tabular-nums font-semibold text-emerald-400">
+                    {onlinePeersCount} online
+                  </span>
+                </div>
+                <div className="space-y-1">
+                  {peers.map((peer) => (
+                    <div
+                      key={peer.id}
+                      className="flex items-center justify-between text-[11px] py-1 border-b border-white/[0.04] last:border-b-0"
+                    >
+                      <span className="text-slate-200 truncate">{peer.fullName}</span>
+                      <span className="font-mono tabular-nums text-slate-400 shrink-0">
+                        ({peer.x.toFixed(1)}, {peer.y.toFixed(1)})
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </aside>
+        </>
+      )}
+
       {/* MOBILE THUMB-ZONE BOTTOM WAYFINDING DOCK (< lg) */}
-      <div className="lg:hidden shrink-0 bg-[#111622] border-t border-white/[0.08] px-3.5 py-2.5 z-30">
+      <div className="lg:hidden shrink-0 bg-[#111622] border-t border-white/[0.08] px-3 py-2 z-30">
         {activeTarget ? (
-          <div className="flex items-center justify-between gap-2.5">
+          <div className="flex items-center justify-between gap-2">
             <button
               type="button"
               onClick={() => setIsMobileSheetOpen(true)}
-              className="flex items-center gap-2.5 min-w-0 flex-1 text-left py-1 rounded-xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
+              className="min-h-[44px] flex items-center gap-2.5 min-w-0 flex-1 text-left py-1 rounded-xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
             >
               <div
                 className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 border ${
@@ -1814,8 +2549,7 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
                       <span className="text-sky-400 font-semibold">
                         {remainingDistanceMeters.toFixed(1)} m
                       </span>{' '}
-                      · ~{Math.max(1, Math.round(remainingDistanceMeters / 1.1))}s ·{' '}
-                      {userPose.stepCount} steps
+                      · ~{routeEtaSeconds}s · {userPose.stepCount} steps
                     </>
                   )}
                 </div>
@@ -1827,7 +2561,7 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
                 type="button"
                 onClick={() => setIsMobileSheetOpen(true)}
                 aria-label="Open directory"
-                className="min-h-[42px] px-3 rounded-xl text-xs font-semibold bg-[#182030] text-slate-200 border border-white/[0.08] flex items-center gap-1.5"
+                className="min-h-[44px] px-3 rounded-xl text-xs font-semibold bg-[#182030] text-slate-200 border border-white/[0.08] flex items-center gap-1.5"
               >
                 <Users className="w-3.5 h-3.5" aria-hidden="true" />
                 <span>List</span>
@@ -1838,7 +2572,7 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
                   setTargetPeerId(null);
                   setTargetRoomId(null);
                 }}
-                className="min-h-[42px] px-3 rounded-xl text-xs font-semibold bg-slate-800 text-slate-200 border border-white/[0.08]"
+                className="min-h-[44px] px-3 rounded-xl text-xs font-semibold bg-slate-800 text-slate-200 border border-white/[0.08]"
               >
                 {hasArrived ? 'Done' : 'Cancel'}
               </button>
@@ -1855,7 +2589,7 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
               <span>Find People &amp; Rooms</span>
             </span>
             <span className="text-xs font-mono tabular-nums font-bold">
-              {peers.length} online
+              {onlinePeersCount} online
             </span>
           </button>
         )}
@@ -1883,7 +2617,7 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
               <div>
                 <h2 className="text-base font-bold text-white leading-tight">Floor 1 Directory</h2>
                 <p className="text-xs text-slate-400 mt-0.5">
-                  {peers.length} active people <span aria-hidden="true">·</span>{' '}
+                  {onlinePeersCount} active people <span aria-hidden="true">·</span>{' '}
                   {roomDestinations.length} rooms
                 </p>
               </div>
@@ -1891,7 +2625,7 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
                 type="button"
                 onClick={() => setIsMobileSheetOpen(false)}
                 aria-label="Close directory"
-                className="w-10 h-10 rounded-xl text-slate-400 hover:text-white hover:bg-slate-800 flex items-center justify-center transition-colors"
+                className="w-11 h-11 rounded-xl text-slate-400 hover:text-white hover:bg-slate-800 flex items-center justify-center transition-colors"
               >
                 <X className="w-5 h-5" />
               </button>

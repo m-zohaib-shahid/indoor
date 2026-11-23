@@ -11,6 +11,8 @@
     background-color: #0b0f17;
     color: #f8fafc;
     font-family: var(--font-sans);
+    overflow-x: hidden;
+    width: 100%;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
     overscroll-behavior: none;
