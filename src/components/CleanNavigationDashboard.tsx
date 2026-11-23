@@ -43,11 +43,11 @@ const WORLD_BOUNDS = {
   minX: 1.0,
   maxX: 31.0,
   minY: 1.0,
-  maxY: 24.1,
+  maxY: 24.0,
   width: 30.0,
-  height: 23.1,
+  height: 23.0,
   centerX: 16.0,
-  centerY: 12.55,
+  centerY: 12.5,
 };
 
 const ROOM_CODES: Record<string, string> = {
@@ -120,8 +120,8 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
       email: 'hassaan@enterprise.io',
       role: 'Lead Architect',
       department: 'Executive Suite',
-      x: 25.0,
-      y: 19.5,
+      x: 26.0,
+      y: 20.0,
       floor: 1,
       isOnline: true,
       avatarColor: '#F59E0B',
@@ -133,8 +133,8 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
       email: 'sarah.j@enterprise.io',
       role: 'RF Engineer',
       department: 'Lab 101',
-      x: 7.0,
-      y: 6.5,
+      x: 6.0,
+      y: 5.0,
       floor: 1,
       isOnline: true,
       avatarColor: '#EC4899',
@@ -146,8 +146,8 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
       email: 'm.vance@enterprise.io',
       role: 'Director of Product',
       department: 'Conference Room A',
-      x: 25.0,
-      y: 6.5,
+      x: 26.0,
+      y: 5.0,
       floor: 1,
       isOnline: true,
       avatarColor: '#38BDF8',
@@ -159,8 +159,8 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
       email: 'elena@enterprise.io',
       role: 'Operations Lead',
       department: 'Cafeteria',
-      x: 7.0,
-      y: 19.5,
+      x: 6.0,
+      y: 20.0,
       floor: 1,
       isOnline: true,
       avatarColor: '#10B981',
@@ -170,35 +170,35 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
 
   const nodes: SimulatorNode[] = useMemo(
     () => [
-      { id: 'room_101', label: 'Lab 101', x: 7, y: 6.5, floor: 1, type: 'room' },
-      { id: 'room_102', label: 'Conference Room A', x: 25, y: 6.5, floor: 1, type: 'room' },
-      { id: 'room_103', label: 'Cafeteria', x: 7, y: 19.5, floor: 1, type: 'room' },
-      { id: 'room_104', label: 'Executive Suite', x: 25, y: 19.5, floor: 1, type: 'room' },
-      { id: 'room_105', label: 'Server Hub', x: 16, y: 3.5, floor: 1, type: 'room' },
-      { id: 'corr_center', label: 'Central Atrium', x: 16, y: 13, floor: 1, type: 'corridor' },
-      { id: 'corr_north', label: 'North Corridor', x: 16, y: 6.5, floor: 1, type: 'corridor' },
-      { id: 'corr_south', label: 'South Corridor', x: 16, y: 19.5, floor: 1, type: 'corridor' },
-      { id: 'corr_west', label: 'West Hallway', x: 10.5, y: 13, floor: 1, type: 'corridor' },
-      { id: 'corr_east', label: 'East Hallway', x: 21.5, y: 13, floor: 1, type: 'corridor' },
+      { id: 'room_101', label: 'Lab 101', x: 6.0, y: 5.0, floor: 1, type: 'room' },
+      { id: 'room_102', label: 'Conference Room A', x: 26.0, y: 5.0, floor: 1, type: 'room' },
+      { id: 'room_103', label: 'Cafeteria', x: 6.0, y: 20.0, floor: 1, type: 'room' },
+      { id: 'room_104', label: 'Executive Suite', x: 26.0, y: 20.0, floor: 1, type: 'room' },
+      { id: 'room_105', label: 'Server Hub', x: 16.0, y: 2.8, floor: 1, type: 'room' },
+      { id: 'corr_center', label: 'Central Atrium', x: 16.0, y: 12.5, floor: 1, type: 'corridor' },
+      { id: 'corr_north', label: 'North Corridor', x: 16.0, y: 7.2, floor: 1, type: 'corridor' },
+      { id: 'corr_south', label: 'South Lobby', x: 16.0, y: 19.5, floor: 1, type: 'corridor' },
+      { id: 'corr_west', label: 'West Concourse', x: 7.0, y: 12.5, floor: 1, type: 'corridor' },
+      { id: 'corr_east', label: 'East Concourse', x: 25.0, y: 12.5, floor: 1, type: 'corridor' },
     ],
     []
   );
 
   const edges: SimulatorEdge[] = useMemo(
     () => [
-      { fromId: 'corr_center', toId: 'corr_north', weight: 6.5 },
-      { fromId: 'corr_center', toId: 'corr_south', weight: 6.5 },
-      { fromId: 'corr_center', toId: 'corr_west', weight: 5.5 },
-      { fromId: 'corr_center', toId: 'corr_east', weight: 5.5 },
-      { fromId: 'corr_north', toId: 'room_101', weight: 9 },
-      { fromId: 'corr_north', toId: 'room_102', weight: 9 },
-      { fromId: 'corr_north', toId: 'room_105', weight: 3 },
-      { fromId: 'corr_south', toId: 'room_103', weight: 9 },
-      { fromId: 'corr_south', toId: 'room_104', weight: 9 },
-      { fromId: 'corr_west', toId: 'room_101', weight: 7.4 },
-      { fromId: 'corr_west', toId: 'room_103', weight: 7.4 },
-      { fromId: 'corr_east', toId: 'room_102', weight: 7.4 },
-      { fromId: 'corr_east', toId: 'room_104', weight: 7.4 },
+      { fromId: 'corr_center', toId: 'corr_north', weight: 5.3 },
+      { fromId: 'corr_center', toId: 'corr_south', weight: 7.0 },
+      { fromId: 'corr_center', toId: 'corr_west', weight: 9.0 },
+      { fromId: 'corr_center', toId: 'corr_east', weight: 9.0 },
+      { fromId: 'corr_north', toId: 'room_101', weight: 10.2 },
+      { fromId: 'corr_north', toId: 'room_102', weight: 10.2 },
+      { fromId: 'corr_north', toId: 'room_105', weight: 4.4 },
+      { fromId: 'corr_south', toId: 'room_103', weight: 10.0 },
+      { fromId: 'corr_south', toId: 'room_104', weight: 10.0 },
+      { fromId: 'corr_west', toId: 'room_101', weight: 7.5 },
+      { fromId: 'corr_west', toId: 'room_103', weight: 7.5 },
+      { fromId: 'corr_east', toId: 'room_102', weight: 7.5 },
+      { fromId: 'corr_east', toId: 'room_104', weight: 7.5 },
     ],
     []
   );
@@ -210,7 +210,7 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
 
   const [userPose, setUserPose] = useState<UserPose>({
     x: 16.0,
-    y: 13.0,
+    y: 12.5,
     floor: 1,
     heading: 90,
     stepCount: 142,
@@ -450,10 +450,10 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
         prev.map((peer, idx) => {
           const angle = Date.now() / 1400 + idx * 1.5;
           const bases = [
-            { x: 25.0, y: 19.5 },
-            { x: 7.0, y: 6.5 },
-            { x: 25.0, y: 6.5 },
-            { x: 7.0, y: 19.5 },
+            { x: 26.0, y: 20.0 },
+            { x: 6.0, y: 5.0 },
+            { x: 26.0, y: 5.0 },
+            { x: 6.0, y: 20.0 },
           ];
           const b = bases[idx] || { x: peer.x, y: peer.y };
           return {
@@ -656,15 +656,15 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
     ctx.save();
     ctx.scale(dpr, dpr);
 
-    // 1. Deep Obsidian-Graphite Map Background
-    ctx.fillStyle = '#0B0F17';
+    // 1. Deep Obsidian Survey Backdrop
+    ctx.fillStyle = '#080C14';
     ctx.fillRect(0, 0, viewW, viewH);
 
-    // Subtle structural dot grid aligned to camera
+    // Subtle survey coordinate dots outside building
     const { scale, panX, panY } = camera;
     const stepPx = scale * 2;
     if (stepPx >= 16) {
-      ctx.fillStyle = 'rgba(148, 163, 184, 0.14)';
+      ctx.fillStyle = 'rgba(148, 163, 184, 0.12)';
       const startX = ((panX % stepPx) + stepPx) % stepPx;
       const startY = ((panY % stepPx) + stepPx) % stepPx;
       for (let gx = startX; gx < viewW; gx += stepPx) {
@@ -678,45 +678,193 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
     const wx = (mx: number) => panX + mx * scale;
     const wy = (my: number) => panY + my * scale;
 
-    // 2. Building Floor Slab (Corridors & Walkways)
+    // 2. Walkable Corridors & Main Concourse Pavement (Visibly lighter than enclosed rooms!)
     const bx = wx(WORLD_BOUNDS.minX);
     const by = wy(WORLD_BOUNDS.minY);
     const bw = WORLD_BOUNDS.width * scale;
     const bh = WORLD_BOUNDS.height * scale;
 
-    ctx.fillStyle = '#121826';
+    ctx.save();
     ctx.beginPath();
-    ctx.roundRect(bx, by, bw, bh, Math.max(4, scale * 0.28));
-    ctx.fill();
+    ctx.rect(bx, by, bw, bh);
+    ctx.clip();
 
-    // 3. Rooms, Doorways & Architectural Labels
+    // Lit architectural terrazzo corridor floor
+    ctx.fillStyle = '#1E293B';
+    ctx.fillRect(bx, by, bw, bh);
+
+    // Subtle 2m x 2m floor tile lines across walkable corridors
+    ctx.strokeStyle = 'rgba(148, 163, 184, 0.06)';
+    ctx.lineWidth = 1;
+    for (let mx = WORLD_BOUNDS.minX; mx <= WORLD_BOUNDS.maxX; mx += 2) {
+      const px = wx(mx);
+      ctx.beginPath();
+      ctx.moveTo(px, by);
+      ctx.lineTo(px, by + bh);
+      ctx.stroke();
+    }
+    for (let my = WORLD_BOUNDS.minY; my <= WORLD_BOUNDS.maxY; my += 2) {
+      const py = wy(my);
+      ctx.beginPath();
+      ctx.moveTo(bx, py);
+      ctx.lineTo(bx + bw, py);
+      ctx.stroke();
+    }
+
+    // Subtle corridor circulation centerline guides (dashed architectural lane markers)
+    ctx.strokeStyle = 'rgba(148, 163, 184, 0.12)';
+    ctx.lineWidth = Math.max(1, scale * 0.04);
+    ctx.setLineDash([6, 8]);
+    // East-West concourse axis
+    ctx.beginPath();
+    ctx.moveTo(wx(2.0), wy(12.5));
+    ctx.lineTo(wx(13.0), wy(12.5));
+    ctx.moveTo(wx(19.0), wy(12.5));
+    ctx.lineTo(wx(30.0), wy(12.5));
+    // North-South corridor axis
+    ctx.moveTo(wx(16.0), wy(4.8));
+    ctx.lineTo(wx(16.0), wy(10.0));
+    ctx.moveTo(wx(16.0), wy(15.0));
+    ctx.lineTo(wx(16.0), wy(23.0));
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // Corridor & Lobby Architectural Zone Labels
+    if (scale >= 11) {
+      const hallFont = Math.max(8.5, Math.min(11, scale * 0.34));
+      ctx.fillStyle = 'rgba(148, 163, 184, 0.42)';
+      ctx.font = `600 ${hallFont}px "JetBrains Mono", monospace`;
+      ctx.textAlign = 'center';
+      ctx.fillText('NORTH CORRIDOR', wx(16.0), wy(7.1));
+      ctx.fillText('SOUTH LOBBY', wx(16.0), wy(21.8));
+      ctx.fillText('WEST CONCOURSE', wx(7.0), wy(14.3));
+      ctx.fillText('EAST CONCOURSE', wx(25.0), wy(14.3));
+      ctx.textAlign = 'left';
+    }
+
+    // 3. Enclosed Rooms, Recessed Floor Surfaces & CAD Furniture Context
     FLOOR_ROOMS.forEach((r) => {
       const rx = wx(r.x);
       const ry = wy(r.y);
       const rw = r.w * scale;
       const rh = r.h * scale;
       const isRoomTarget = targetRoomId === r.id;
+      const isAtrium = r.id === 'corr_center';
 
       ctx.fillStyle = isRoomTarget
-        ? 'rgba(56, 189, 248, 0.16)'
-        : r.id === 'corr_center'
-          ? '#161F33'
-          : '#1A2336';
-      ctx.beginPath();
-      ctx.roundRect(rx, ry, rw, rh, Math.max(3, scale * 0.2));
-      ctx.fill();
+        ? 'rgba(56, 189, 248, 0.14)'
+        : isAtrium
+          ? '#172236'
+          : '#111827';
+      ctx.fillRect(rx, ry, rw, rh);
 
-      if (isRoomTarget) {
-        ctx.strokeStyle = 'rgba(56, 189, 248, 0.55)';
-        ctx.lineWidth = 1.5;
+      // Subtle architectural room furniture & structural inlays (low-contrast CAD layer)
+      ctx.strokeStyle = 'rgba(148, 163, 184, 0.13)';
+      ctx.fillStyle = 'rgba(148, 163, 184, 0.045)';
+      ctx.lineWidth = Math.max(1, scale * 0.04);
+
+      if (r.id === 'room_101') {
+        // Two Lab workbenches on west wall + corner instrumentation desk
+        ctx.fillRect(wx(2.0), wy(3.2), 2.3 * scale, 1.1 * scale);
+        ctx.strokeRect(wx(2.0), wy(3.2), 2.3 * scale, 1.1 * scale);
+        ctx.fillRect(wx(2.0), wy(5.6), 2.3 * scale, 1.1 * scale);
+        ctx.strokeRect(wx(2.0), wy(5.6), 2.3 * scale, 1.1 * scale);
+        ctx.fillRect(wx(8.2), wy(1.7), 2.0 * scale, 1.2 * scale);
+        ctx.strokeRect(wx(8.2), wy(1.7), 2.0 * scale, 1.2 * scale);
+      } else if (r.id === 'room_102') {
+        // Boardroom oval table in upper-right clear of peer pin (26, 5)
+        ctx.beginPath();
+        ctx.roundRect(wx(24.0), wy(2.0), 4.6 * scale, 1.6 * scale, 0.75 * scale);
+        ctx.fill();
         ctx.stroke();
+        // Chair ticks along top & bottom of table
+        for (let cx = 24.7; cx <= 28.0; cx += 1.1) {
+          ctx.beginPath();
+          ctx.arc(wx(cx), wy(1.75), 0.18 * scale, 0, Math.PI * 2);
+          ctx.arc(wx(cx), wy(3.85), 0.18 * scale, 0, Math.PI * 2);
+          ctx.stroke();
+        }
+      } else if (r.id === 'room_105') {
+        // 3 Server rack bays along north wall
+        for (const sx of [13.9, 15.5, 17.1]) {
+          ctx.fillRect(wx(sx), wy(1.45), 1.0 * scale, 0.65 * scale);
+          ctx.strokeRect(wx(sx), wy(1.45), 1.0 * scale, 0.65 * scale);
+        }
+      } else if (r.id === 'room_103') {
+        // 3 circular cafe tables clear of peer pin (6, 20)
+        for (const [tx, ty] of [
+          [2.7, 18.6],
+          [2.7, 21.8],
+          [8.4, 22.1],
+        ]) {
+          ctx.beginPath();
+          ctx.arc(wx(tx), wy(ty), 0.68 * scale, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.stroke();
+        }
+      } else if (r.id === 'room_104') {
+        // Executive L-desk along east wall + lounge corner table clear of (26, 20)
+        ctx.fillRect(wx(28.5), wy(18.0), 1.5 * scale, 4.0 * scale);
+        ctx.strokeRect(wx(28.5), wy(18.0), 1.5 * scale, 4.0 * scale);
+        ctx.beginPath();
+        ctx.arc(wx(23.3), wy(22.1), 0.65 * scale, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+      } else if (isAtrium) {
+        // Central Atrium architectural medallion & 4 structural columns
+        ctx.beginPath();
+        ctx.arc(wx(16.0), wy(12.5), 1.85 * scale, 0, Math.PI * 2);
+        ctx.stroke();
+        for (const [colX, colY] of [
+          [13.45, 10.45],
+          [18.25, 10.45],
+          [13.45, 14.25],
+          [18.25, 14.25],
+        ]) {
+          ctx.fillStyle = 'rgba(100, 116, 139, 0.35)';
+          ctx.fillRect(wx(colX), wy(colY), 0.3 * scale, 0.3 * scale);
+        }
       }
 
-      // Doorway threshold openings
-      ctx.strokeStyle = 'rgba(56, 189, 248, 0.45)';
-      ctx.lineWidth = Math.max(1.5, scale * 0.07);
-      ctx.setLineDash([4, 4]);
+      if (isRoomTarget) {
+        ctx.strokeStyle = 'rgba(56, 189, 248, 0.45)';
+        ctx.lineWidth = 1.5;
+        ctx.strokeRect(rx + 1, ry + 1, rw - 2, rh - 2);
+      }
+
+      // Room Typography
+      const labelFontSize = Math.max(10, Math.min(13.5, scale * 0.44));
+      const codeFontSize = Math.max(8.5, Math.min(10.5, scale * 0.34));
+      const labelPadX = Math.max(8, scale * 0.45);
+      const labelPadY = Math.max(16, scale * 0.85);
+
+      ctx.fillStyle = isRoomTarget ? '#7DD3FC' : '#E2E8F0';
+      ctx.font = `600 ${labelFontSize}px "Plus Jakarta Sans", system-ui, sans-serif`;
+      ctx.fillText(r.name, rx + labelPadX, ry + labelPadY);
+
+      const code = ROOM_CODES[r.id];
+      if (code && scale >= 14 && !isAtrium) {
+        ctx.fillStyle = '#64748B';
+        ctx.font = `500 ${codeFontSize}px "JetBrains Mono", monospace`;
+        ctx.fillText(`RM ${code}`, rx + labelPadX, ry + labelPadY + codeFontSize + 5);
+      }
+    });
+
+    // 4. Open Doorway Floor Thresholds & CAD Door-Swing Arcs
+    FLOOR_ROOMS.forEach((r) => {
+      const rx = wx(r.x);
+      const ry = wy(r.y);
+      const rw = r.w * scale;
+      const rh = r.h * scale;
+      const isAtrium = r.id === 'corr_center';
+
       r.doors.forEach((d) => {
+        const doorLenPx = (d.end - d.start) * scale;
+        const swingR = Math.min(doorLenPx * 0.55, scale * 1.15);
+
+        // Paint doorway threshold floor strip in corridor color so wall visibly opens
+        ctx.strokeStyle = '#1E293B';
+        ctx.lineWidth = Math.max(4, scale * 0.22);
         ctx.beginPath();
         if (d.side === 'top') {
           ctx.moveTo(wx(r.x + d.start), ry);
@@ -732,44 +880,85 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
           ctx.lineTo(rx + rw, wy(r.y + d.end));
         }
         ctx.stroke();
+
+        // Subtle dashed cyan threshold saddle line
+        ctx.strokeStyle = isAtrium ? 'rgba(56, 189, 248, 0.42)' : 'rgba(56, 189, 248, 0.32)';
+        ctx.lineWidth = Math.max(1.2, scale * 0.05);
+        ctx.setLineDash([4, 4]);
+        ctx.beginPath();
+        if (d.side === 'top') {
+          ctx.moveTo(wx(r.x + d.start), ry);
+          ctx.lineTo(wx(r.x + d.end), ry);
+        } else if (d.side === 'bottom') {
+          ctx.moveTo(wx(r.x + d.start), ry + rh);
+          ctx.lineTo(wx(r.x + d.end), ry + rh);
+        } else if (d.side === 'left') {
+          ctx.moveTo(rx, wy(r.y + d.start));
+          ctx.lineTo(rx, wy(r.y + d.end));
+        } else {
+          ctx.moveTo(rx + rw, wy(r.y + d.start));
+          ctx.lineTo(rx + rw, wy(r.y + d.end));
+        }
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        // Architectural CAD inward door swing arc on standard enclosed rooms
+        if (!isAtrium && scale >= 12) {
+          ctx.strokeStyle = 'rgba(148, 163, 184, 0.28)';
+          ctx.lineWidth = 1.1;
+          ctx.beginPath();
+          if (d.side === 'top') {
+            const hx = wx(r.x + d.start);
+            ctx.moveTo(hx, ry);
+            ctx.lineTo(hx, ry + swingR);
+            ctx.arc(hx, ry, swingR, Math.PI / 2, 0, true);
+          } else if (d.side === 'bottom') {
+            const hx = wx(r.x + d.start);
+            ctx.moveTo(hx, ry + rh);
+            ctx.lineTo(hx, ry + rh - swingR);
+            ctx.arc(hx, ry + rh, swingR, -Math.PI / 2, 0, false);
+          } else if (d.side === 'left') {
+            const hy = wy(r.y + d.start);
+            ctx.moveTo(rx, hy);
+            ctx.lineTo(rx + swingR, hy);
+            ctx.arc(rx, hy, swingR, 0, Math.PI / 2, false);
+          } else {
+            const hy = wy(r.y + d.start);
+            ctx.moveTo(rx + rw, hy);
+            ctx.lineTo(rx + rw - swingR, hy);
+            ctx.arc(rx + rw, hy, swingR, Math.PI, Math.PI / 2, true);
+          }
+          ctx.stroke();
+        }
       });
-      ctx.setLineDash([]);
-
-      // Room Typography (scales gracefully on phone vs desktop)
-      const labelFontSize = Math.max(10, Math.min(13.5, scale * 0.44));
-      const codeFontSize = Math.max(8.5, Math.min(10.5, scale * 0.34));
-      const labelPadX = Math.max(8, scale * 0.45);
-      const labelPadY = Math.max(16, scale * 0.85);
-
-      ctx.fillStyle = isRoomTarget ? '#7DD3FC' : '#CBD5E1';
-      ctx.font = `600 ${labelFontSize}px "Plus Jakarta Sans", system-ui, sans-serif`;
-      ctx.fillText(r.name, rx + labelPadX, ry + labelPadY);
-
-      const code = ROOM_CODES[r.id];
-      if (code && scale >= 14) {
-        ctx.fillStyle = '#64748B';
-        ctx.font = `500 ${codeFontSize}px "JetBrains Mono", monospace`;
-        ctx.fillText(code, rx + labelPadX, ry + labelPadY + codeFontSize + 5);
-      }
     });
 
-    // 4. Solid Structural Walls
-    ctx.strokeStyle = '#3B4D6B';
-    ctx.lineWidth = Math.max(2, scale * 0.11);
-    ctx.lineCap = 'round';
-    FLOOR_WALL_SEGMENTS.forEach((w) => {
+    // 5. Crisp Structural Partition Walls + Thick Exterior Envelope
+    ctx.lineCap = 'square';
+    FLOOR_WALL_SEGMENTS.forEach((w, idx) => {
+      const isOuter = idx < 4;
+      ctx.strokeStyle = isOuter ? '#64748B' : '#4E6382';
+      ctx.lineWidth = isOuter ? Math.max(3.2, scale * 0.17) : Math.max(2.2, scale * 0.12);
       ctx.beginPath();
       ctx.moveTo(wx(w.x1), wy(w.y1));
       ctx.lineTo(wx(w.x2), wy(w.y2));
       ctx.stroke();
     });
 
-    // 5. Crisp Sky-Cyan Wayfinding Path (strictly routed through doorways around walls)
+    ctx.restore(); // Release building footprint clip
+
+    // Crisp outer perimeter frame stroke cleanly framing the building shell
+    ctx.strokeStyle = '#64748B';
+    ctx.lineWidth = Math.max(2.8, scale * 0.15);
+    ctx.strokeRect(bx, by, bw, bh);
+
+    // 6. 3-Layer High-Craft Wayfinding Path + Forward Directional Chevrons
     if (activeRoute && activeRoute.pathCoordinates.length > 1) {
       const coords = activeRoute.pathCoordinates;
 
+      // Layer A: Soft atmospheric sky-cyan glow
       ctx.strokeStyle = 'rgba(56, 189, 248, 0.22)';
-      ctx.lineWidth = Math.max(7, scale * 0.34);
+      ctx.lineWidth = Math.max(9, scale * 0.38);
       ctx.lineCap = 'round';
       ctx.lineJoin = 'round';
       ctx.beginPath();
@@ -777,23 +966,68 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
       coords.forEach((c) => ctx.lineTo(wx(c.x), wy(c.y)));
       ctx.stroke();
 
+      // Layer B: Dark contrast casing separating route from corridor tiles & threshold lines
+      ctx.strokeStyle = '#09111E';
+      ctx.lineWidth = Math.max(4.5, scale * 0.21);
+      ctx.beginPath();
+      ctx.moveTo(wx(coords[0].x), wy(coords[0].y));
+      coords.forEach((c) => ctx.lineTo(wx(c.x), wy(c.y)));
+      ctx.stroke();
+
+      // Layer C: Bright animated directional route core
       ctx.strokeStyle = '#38BDF8';
-      ctx.lineWidth = Math.max(2.5, scale * 0.12);
-      ctx.setLineDash([7, 5]);
-      ctx.lineDashOffset = -pulseAnim * 24;
+      ctx.lineWidth = Math.max(2.6, scale * 0.12);
+      ctx.setLineDash([8, 6]);
+      ctx.lineDashOffset = -pulseAnim * 28;
       ctx.beginPath();
       ctx.moveTo(wx(coords[0].x), wy(coords[0].y));
       coords.forEach((c) => ctx.lineTo(wx(c.x), wy(c.y)));
       ctx.stroke();
       ctx.setLineDash([]);
 
-      // Subtle architectural turn nodes at doorway / corridor bends
+      // Forward directional chevron arrowheads along path segments
+      const chevronSpacingM = 3.0;
+      const chevronSize = Math.max(4.5, Math.min(7.5, scale * 0.23));
+      ctx.strokeStyle = '#E0F2FE';
+      ctx.lineWidth = Math.max(1.6, scale * 0.075);
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+
+      for (let i = 0; i < coords.length - 1; i++) {
+        const ax = coords[i].x;
+        const ay = coords[i].y;
+        const dx = coords[i + 1].x - ax;
+        const dy = coords[i + 1].y - ay;
+        const segLen = Math.hypot(dx, dy);
+        if (segLen < 1.8) continue;
+
+        const angle = Math.atan2(dy, dx);
+        const count = Math.floor(segLen / chevronSpacingM);
+        for (let k = 1; k <= count; k++) {
+          const frac = (k * chevronSpacingM) / (segLen + 0.5);
+          if (frac <= 0.15 || frac >= 0.88) continue;
+          const cx = wx(ax + dx * frac);
+          const cy = wy(ay + dy * frac);
+
+          ctx.save();
+          ctx.translate(cx, cy);
+          ctx.rotate(angle);
+          ctx.beginPath();
+          ctx.moveTo(-chevronSize * 0.65, -chevronSize * 0.65);
+          ctx.lineTo(chevronSize * 0.45, 0);
+          ctx.lineTo(-chevronSize * 0.65, chevronSize * 0.65);
+          ctx.stroke();
+          ctx.restore();
+        }
+      }
+
+      // Clean corridor/doorway turn-node joints
       for (let i = 1; i < coords.length - 1; i++) {
         const turnX = wx(coords[i].x);
         const turnY = wy(coords[i].y);
-        ctx.fillStyle = '#0B0F17';
+        ctx.fillStyle = '#09111E';
         ctx.beginPath();
-        ctx.arc(turnX, turnY, Math.max(3, scale * 0.14), 0, Math.PI * 2);
+        ctx.arc(turnX, turnY, Math.max(3.5, scale * 0.15), 0, Math.PI * 2);
         ctx.fill();
         ctx.strokeStyle = '#7DD3FC';
         ctx.lineWidth = 1.8;

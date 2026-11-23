@@ -222,11 +222,13 @@ const NAV_GRID_STEP = 0.5;
 const NAV_GRID_COLS = 59; // x: 1.5 .. 30.5
 const NAV_GRID_ROWS = 45; // y: 1.5 .. 23.5
 const NAV_CELL_COUNT = NAV_GRID_COLS * NAV_GRID_ROWS;
-const NAV_CLEARANCE = USER_COLLISION_RADIUS; // 0.34m keeps route + outer glow clear of walls
-const NAV_EDGE_CLEARANCE = 0.28;
+const NAV_CLEARANCE = Math.max(USER_COLLISION_RADIUS, 0.45); // 0.45m keeps routes cleanly inside corridors/doors
+const NAV_EDGE_CLEARANCE = 0.42;
+const NAV_DIAGONAL_CLEARANCE = 1.05; // Diagonal shortcuts allowed only in open space away from door jambs
 
 interface NavNeighbor {
   to: number;
+  dir: number; // 0:W, 1:E, 2:N, 3:S
   cost: number;
 }
 
@@ -243,6 +245,7 @@ let cachedDefaultNavGrid: NavGridData | null = null;
 function buildNavGrid(walls: WallSegment[]): NavGridData {
   const cellX = new Float64Array(NAV_CELL_COUNT);
   const cellY = new Float64Array(NAV_CELL_COUNT);
+  const wallClearance = new Float64Array(NAV_CELL_COUNT);
   const walkable = new Uint8Array(NAV_CELL_COUNT);
   const neighbors: NavNeighbor[][] = Array.from({ length: NAV_CELL_COUNT }, () => []);
 
@@ -253,21 +256,20 @@ function buildNavGrid(walls: WallSegment[]): NavGridData {
       const idx = r * NAV_GRID_COLS + c;
       cellX[idx] = x;
       cellY[idx] = y;
-      if (isPathSegmentClear(x, y, x, y, walls, NAV_CLEARANCE)) {
+      const wDist = minDistanceToWalls(x, y, walls);
+      wallClearance[idx] = wDist;
+      if (wDist >= NAV_CLEARANCE) {
         walkable[idx] = 1;
       }
     }
   }
 
+  // 4 cardinal architectural directions keep routes aligned to hallways and perpendicular through doorways
   const dirs = [
-    [-1, 0],
-    [1, 0],
-    [0, -1],
-    [0, 1],
-    [-1, -1],
-    [1, -1],
-    [-1, 1],
-    [1, 1],
+    [-1, 0, 0], // West
+    [1, 0, 1],  // East
+    [0, -1, 2], // North
+    [0, 1, 3],  // South
   ];
 
   for (let r = 0; r < NAV_GRID_ROWS; r++) {
@@ -277,7 +279,7 @@ function buildNavGrid(walls: WallSegment[]): NavGridData {
       const x1 = cellX[idx];
       const y1 = cellY[idx];
 
-      for (const [dc, dr] of dirs) {
+      for (const [dc, dr, dirId] of dirs) {
         const nc = c + dc;
         const nr = r + dr;
         if (nc < 0 || nc >= NAV_GRID_COLS || nr < 0 || nr >= NAV_GRID_ROWS) continue;
@@ -286,11 +288,15 @@ function buildNavGrid(walls: WallSegment[]): NavGridData {
 
         const x2 = cellX[nIdx];
         const y2 = cellY[nIdx];
-        // Strictly reject any grid edge (especially diagonals) that cuts near or across any wall
         if (isPathSegmentClear(x1, y1, x2, y2, walls, NAV_EDGE_CLEARANCE)) {
+          const baseDist = Math.hypot(x2 - x1, y2 - y1);
+          // Strong corridor/doorway centerline preference so routes walk cleanly down the middle
+          const minAdjWall = Math.min(wallClearance[idx], wallClearance[nIdx]);
+          const centerlinePenalty = minAdjWall < 1.25 ? (1.25 - minAdjWall) * 0.28 : 0;
           neighbors[idx].push({
             to: nIdx,
-            cost: Math.hypot(x2 - x1, y2 - y1),
+            dir: dirId,
+            cost: baseDist * (1 + centerlinePenalty),
           });
         }
       }
@@ -457,7 +463,6 @@ function collectVisibleAnchors(
     return relaxedVisible.slice(0, 8);
   }
 
-  // Wide search fallback if point is inside an unusual alcove
   const fallback: Array<{ idx: number; dist: number }> = [];
   for (let idx = 0; idx < NAV_CELL_COUNT; idx++) {
     if (!grid.walkable[idx]) continue;
@@ -486,9 +491,18 @@ function smoothWaypointsWithStringPulling(
     const b = rawPoints[j];
     const isStart = i === 0;
     const isEnd = j === rawPoints.length - 1;
+    const isOrthogonal = Math.abs(a.x - b.x) < 1e-4 || Math.abs(a.y - b.y) < 1e-4;
 
     if (!isStart && !isEnd) {
-      return isPathSegmentClear(a.x, a.y, b.x, b.y, walls, NAV_CLEARANCE);
+      // Straight corridor runs merge with normal 0.42m clearance; angled diagonals require wide open 1.05m space
+      return isPathSegmentClear(
+        a.x,
+        a.y,
+        b.x,
+        b.y,
+        walls,
+        isOrthogonal ? NAV_EDGE_CLEARANCE : NAV_DIAGONAL_CLEARANCE
+      );
     }
 
     if (doesSegmentCrossAnyWall(a.x, a.y, b.x, b.y, walls)) {
@@ -497,6 +511,17 @@ function smoothWaypointsWithStringPulling(
 
     if (isStart && isEnd) {
       return isPathSegmentClear(a.x, a.y, b.x, b.y, walls, NAV_EDGE_CLEARANCE);
+    }
+
+    // Keep entry/exit angled connections inside wide rooms rather than slanting across doorway posts
+    if (!isOrthogonal && Math.hypot(b.x - a.x, b.y - a.y) > 1.0) {
+      const tx1 = a.x + (b.x - a.x) * (isStart ? 0.15 : 0);
+      const ty1 = a.y + (b.y - a.y) * (isStart ? 0.15 : 0);
+      const tx2 = a.x + (b.x - a.x) * (isEnd ? 0.85 : 1);
+      const ty2 = a.y + (b.y - a.y) * (isEnd ? 0.85 : 1);
+      if (!isPathSegmentClear(tx1, ty1, tx2, ty2, walls, NAV_DIAGONAL_CLEARANCE)) {
+        return false;
+      }
     }
 
     if (isStart) {
@@ -530,8 +555,8 @@ function smoothWaypointsWithStringPulling(
 }
 
 /**
- * Computes a mathematically wall-free shortest path through real doorways and corridors
- * using a 0.5m navigation grid backed by FLOOR_WALL_SEGMENTS + funnel string-pulling.
+ * Computes a mathematically wall-free architectural path through real doorways and corridors
+ * using direction-aware NavGrid A* (4-way corridor alignment) + open-space string-pulling.
  */
 export function findWallFreePath(
   startPoint: { x: number; y: number },
@@ -546,11 +571,11 @@ export function findWallFreePath(
     };
   }
 
-  // 1. Direct clear line-of-sight shortcut (never clips a wall or grazes corners)
+  // 1. Direct clear line-of-sight shortcut when cleanly unobstructed inside the same open space
   if (
-    isPathSegmentClear(startPoint.x, startPoint.y, targetPoint.x, targetPoint.y, walls, NAV_EDGE_CLEARANCE) ||
+    isPathSegmentClear(startPoint.x, startPoint.y, targetPoint.x, targetPoint.y, walls, 0.75) ||
     (!doesSegmentCrossAnyWall(startPoint.x, startPoint.y, targetPoint.x, targetPoint.y, walls) &&
-      directDist <= 0.85)
+      directDist <= 1.2)
   ) {
     return {
       pathCoordinates: [startPoint, targetPoint],
@@ -571,40 +596,49 @@ export function findWallFreePath(
     goalExitCost.set(g.idx, g.dist);
   }
 
-  const VIRTUAL_GOAL = NAV_CELL_COUNT;
-  const gScore = new Float64Array(NAV_CELL_COUNT + 1);
+  // State encoding: cellIdx * 5 + incomingDir (dir 4 = initial virtual start, 0..3 = W/E/N/S)
+  const DIRS_PER_CELL = 5;
+  const TOTAL_STATES = NAV_CELL_COUNT * DIRS_PER_CELL + 1;
+  const VIRTUAL_GOAL = NAV_CELL_COUNT * DIRS_PER_CELL;
+  const TURN_PENALTY = 0.25; // Penalize unnecessary 90-degree corridor stair-stepping
+
+  const gScore = new Float64Array(TOTAL_STATES);
   gScore.fill(Infinity);
-  const cameFrom = new Int32Array(NAV_CELL_COUNT + 1);
+  const cameFrom = new Int32Array(TOTAL_STATES);
   cameFrom.fill(-1);
-  const closed = new Uint8Array(NAV_CELL_COUNT + 1);
+  const closed = new Uint8Array(TOTAL_STATES);
   const heap = new MinHeap();
 
   for (const s of startAnchors) {
-    if (s.dist < gScore[s.idx]) {
-      gScore[s.idx] = s.dist;
+    const stateId = s.idx * DIRS_PER_CELL + 4;
+    if (s.dist < gScore[stateId]) {
+      gScore[stateId] = s.dist;
       const h = Math.hypot(targetPoint.x - grid.cellX[s.idx], targetPoint.y - grid.cellY[s.idx]);
-      heap.push(s.idx, s.dist + h);
+      heap.push(stateId, s.dist + h);
     }
   }
 
   let foundGoal = false;
   while (heap.size > 0) {
     const current = heap.pop()!;
-    const u = current.id;
-    if (closed[u]) continue;
-    closed[u] = 1;
+    const stateId = current.id;
+    if (closed[stateId]) continue;
+    closed[stateId] = 1;
 
-    if (u === VIRTUAL_GOAL) {
+    if (stateId === VIRTUAL_GOAL) {
       foundGoal = true;
       break;
     }
 
+    const u = Math.floor(stateId / DIRS_PER_CELL);
+    const curDir = stateId % DIRS_PER_CELL;
+
     const exitDist = goalExitCost.get(u);
     if (exitDist !== undefined) {
-      const tentativeGoalG = gScore[u] + exitDist;
+      const tentativeGoalG = gScore[stateId] + exitDist;
       if (tentativeGoalG < gScore[VIRTUAL_GOAL]) {
         gScore[VIRTUAL_GOAL] = tentativeGoalG;
-        cameFrom[VIRTUAL_GOAL] = u;
+        cameFrom[VIRTUAL_GOAL] = stateId;
         heap.push(VIRTUAL_GOAL, tentativeGoalG);
       }
     }
@@ -612,16 +646,19 @@ export function findWallFreePath(
     const uNeighbors = grid.neighbors[u];
     for (let i = 0; i < uNeighbors.length; i++) {
       const edge = uNeighbors[i];
-      if (closed[edge.to]) continue;
-      const tentativeG = gScore[u] + edge.cost;
-      if (tentativeG < gScore[edge.to]) {
-        gScore[edge.to] = tentativeG;
-        cameFrom[edge.to] = u;
+      const nextState = edge.to * DIRS_PER_CELL + edge.dir;
+      if (closed[nextState]) continue;
+
+      const turnCost = curDir !== 4 && curDir !== edge.dir ? TURN_PENALTY : 0;
+      const tentativeG = gScore[stateId] + edge.cost + turnCost;
+      if (tentativeG < gScore[nextState]) {
+        gScore[nextState] = tentativeG;
+        cameFrom[nextState] = stateId;
         const h = Math.hypot(
           targetPoint.x - grid.cellX[edge.to],
           targetPoint.y - grid.cellY[edge.to]
         );
-        heap.push(edge.to, tentativeG + h);
+        heap.push(nextState, tentativeG + h);
       }
     }
   }
@@ -634,7 +671,8 @@ export function findWallFreePath(
   const gridCells: Array<{ x: number; y: number }> = [];
   let curr = cameFrom[VIRTUAL_GOAL];
   while (curr !== -1) {
-    gridCells.push({ x: grid.cellX[curr], y: grid.cellY[curr] });
+    const cellIdx = Math.floor(curr / DIRS_PER_CELL);
+    gridCells.push({ x: grid.cellX[cellIdx], y: grid.cellY[cellIdx] });
     curr = cameFrom[curr];
   }
   gridCells.reverse();

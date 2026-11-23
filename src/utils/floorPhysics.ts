@@ -25,74 +25,74 @@ export const FLOOR_ROOMS: RoomRect[] = [
   {
     id: 'room_101',
     name: 'Lab 101',
-    x: 2,
-    y: 2,
+    x: 1,
+    y: 1,
     w: 10,
-    h: 8.5,
+    h: 8,
     doors: [
-      { side: 'right', start: 3.4, end: 5.6 },  // East corridor door (y: 5.4..7.6)
-      { side: 'bottom', start: 7.4, end: 9.6 }, // South hallway door (x: 9.4..11.6)
+      { side: 'right', start: 3.5, end: 5.9 },  // East door into North Corridor (y: 4.5..6.9)
+      { side: 'bottom', start: 6.8, end: 9.2 }, // South door into West Concourse (x: 7.8..10.2)
     ],
   },
   {
     id: 'room_102',
     name: 'Conference Room A',
-    x: 20,
-    y: 2,
+    x: 21,
+    y: 1,
     w: 10,
-    h: 8.5,
+    h: 8,
     doors: [
-      { side: 'left', start: 3.4, end: 5.6 },   // West corridor door (y: 5.4..7.6)
-      { side: 'bottom', start: 0.4, end: 2.6 }, // South hallway door (x: 20.4..22.6)
+      { side: 'left', start: 3.5, end: 5.9 },   // West door into North Corridor (y: 4.5..6.9)
+      { side: 'bottom', start: 0.8, end: 3.2 }, // South door into East Concourse (x: 21.8..24.2)
     ],
   },
   {
     id: 'room_105',
     name: 'Server Hub',
     x: 13,
-    y: 1.5,
+    y: 1,
     w: 6,
-    h: 4,
+    h: 3.5,
     doors: [
-      { side: 'bottom', start: 1.9, end: 4.1 }, // South door to North Corridor (x: 14.9..17.1)
+      { side: 'bottom', start: 1.8, end: 4.2 }, // South door to North Corridor (x: 14.8..17.2)
     ],
   },
   {
     id: 'room_103',
     name: 'Cafeteria',
-    x: 2,
-    y: 15.5,
+    x: 1,
+    y: 16,
     w: 10,
-    h: 8.5,
+    h: 8,
     doors: [
-      { side: 'right', start: 2.9, end: 5.1 }, // East door to South Corridor (y: 18.4..20.6)
-      { side: 'top', start: 7.4, end: 9.6 },   // North door to West Hallway (x: 9.4..11.6)
+      { side: 'right', start: 2.8, end: 5.2 }, // East door to South Lobby (y: 18.8..21.2)
+      { side: 'top', start: 6.8, end: 9.2 },   // North door to West Concourse (x: 7.8..10.2)
     ],
   },
   {
     id: 'room_104',
     name: 'Executive Suite',
-    x: 20,
-    y: 15.5,
+    x: 21,
+    y: 16,
     w: 10,
-    h: 8.5,
+    h: 8,
     doors: [
-      { side: 'left', start: 2.9, end: 5.1 }, // West door to South Corridor (y: 18.4..20.6)
-      { side: 'top', start: 0.4, end: 2.6 },  // North door to East Hallway (x: 20.4..22.6)
+      { side: 'left', start: 2.8, end: 5.2 }, // West door to South Lobby (y: 18.8..21.2)
+      { side: 'top', start: 0.8, end: 3.2 },  // North door to East Concourse (x: 21.8..24.2)
     ],
   },
   {
     id: 'corr_center',
     name: 'Central Atrium',
-    x: 12,
-    y: 9.5,
-    w: 8,
-    h: 7,
+    x: 13,
+    y: 10,
+    w: 6,
+    h: 5,
     doors: [
-      { side: 'top', start: 2.6, end: 5.4 },    // North archway (x: 14.6..17.4)
-      { side: 'bottom', start: 2.6, end: 5.4 }, // South archway (x: 14.6..17.4)
-      { side: 'left', start: 2.1, end: 4.9 },   // West archway (y: 11.6..14.4)
-      { side: 'right', start: 2.1, end: 4.9 },  // East archway (y: 11.6..14.4)
+      { side: 'top', start: 1.7, end: 4.3 },    // North archway (x: 14.7..17.3)
+      { side: 'bottom', start: 1.7, end: 4.3 }, // South archway (x: 14.7..17.3)
+      { side: 'left', start: 1.3, end: 3.7 },   // West archway (y: 11.3..13.7)
+      { side: 'right', start: 1.3, end: 3.7 },  // East archway (y: 11.3..13.7)
     ],
   },
 ];
@@ -124,9 +124,9 @@ export function buildWallSegments(rooms: RoomRect[] = FLOOR_ROOMS): WallSegment[
   const walls: WallSegment[] = [
     // Building outer perimeter walls (meters)
     { x1: 1.0, y1: 1.0, x2: 31.0, y2: 1.0 },
-    { x1: 31.0, y1: 1.0, x2: 31.0, y2: 24.1 },
-    { x1: 31.0, y1: 24.1, x2: 1.0, y2: 24.1 },
-    { x1: 1.0, y1: 24.1, x2: 1.0, y2: 1.0 },
+    { x1: 31.0, y1: 1.0, x2: 31.0, y2: 24.0 },
+    { x1: 31.0, y1: 24.0, x2: 1.0, y2: 24.0 },
+    { x1: 1.0, y1: 24.0, x2: 1.0, y2: 1.0 },
   ];
 
   for (const room of rooms) {
@@ -356,8 +356,8 @@ export function resolveWallCollision(
   let hitWall = false;
 
   for (let i = 0; i < steps; i++) {
-    const nextX = Math.max(1.4, Math.min(30.6, curX + stepDx));
-    const nextY = Math.max(1.4, Math.min(23.7, curY + stepDy));
+    const nextX = Math.max(1.36, Math.min(30.64, curX + stepDx));
+    const nextY = Math.max(1.36, Math.min(23.64, curY + stepDy));
 
     if (isMoveClear(curX, curY, nextX, nextY, walls, radius)) {
       curX = nextX;
