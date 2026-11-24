@@ -442,11 +442,11 @@ export class AntiShakeStepDetector {
   private rapidPeakCount = 0;
   private shakeLockoutUntilMs = 0;
 
-  private readonly minStepIntervalMs = 320; // Supports slow to brisk indoor walking
+  private readonly minStepIntervalMs = 380; // Caps cadence at ~2.6 steps/sec to prevent double-counting heel-strike bounce
   private readonly maxGyroDegPerSec = 250;  // Rejects rapid wrist-shaking while allowing normal walking turns
-  private readonly peakThreshold = 0.52;    // m/s^2 above gravity (reliable for handheld phone walking)
-  private readonly valleyThreshold = -0.32; // m/s^2 below gravity
-  private readonly minPeakToValley = 1.05;  // Total stride peak-to-valley amplitude
+  private readonly peakThreshold = 0.54;    // m/s^2 above gravity (reliable for handheld phone walking)
+  private readonly valleyThreshold = -0.34; // m/s^2 below gravity
+  private readonly minPeakToValley = 1.12;  // Total stride peak-to-valley amplitude
 
   public reset(): void {
     this.gravityMag = 9.81;

@@ -24,6 +24,7 @@ import {
   ChevronDown,
   Edit3,
   RefreshCw,
+  Layers,
 } from 'lucide-react';
 import {
   BuildingPeer,
@@ -273,6 +274,87 @@ function createInitialBeacons(poseX: number, poseY: number): TelemetryBeaconSnap
   });
 }
 
+interface LabelRect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+function getShortPersonLabel(fullName: string): string {
+  const parts = fullName.trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return 'Visitor';
+  if (/^(dr|mr|mrs|ms|prof)\.?$/i.test(parts[0]) && parts.length >= 2) {
+    return `${parts[0]} ${parts[1]}`;
+  }
+  return parts[0];
+}
+
+function rectsOverlap(a: LabelRect, b: LabelRect, pad = 4): boolean {
+  return !(
+    a.x + a.w + pad <= b.x ||
+    b.x + b.w + pad <= a.x ||
+    a.y + a.h + pad <= b.y ||
+    b.y + b.h + pad <= a.y
+  );
+}
+
+function placeNonOverlappingLabel(
+  anchorX: number,
+  anchorY: number,
+  pinRadius: number,
+  boxW: number,
+  boxH: number,
+  viewW: number,
+  viewH: number,
+  occupied: LabelRect[],
+  preferredOrder: Array<'above' | 'below' | 'right' | 'left'> = ['above', 'below', 'right', 'left']
+): LabelRect {
+  const clampRect = (rx: number, ry: number): LabelRect => ({
+    x: Math.max(8, Math.min(viewW - boxW - 8, rx)),
+    y: Math.max(8, Math.min(viewH - boxH - 8, ry)),
+    w: boxW,
+    h: boxH,
+  });
+
+  const candidates: LabelRect[] = preferredOrder.map((dir) => {
+    if (dir === 'above') {
+      return clampRect(anchorX - boxW / 2, anchorY - pinRadius - boxH - 7);
+    }
+    if (dir === 'below') {
+      return clampRect(anchorX - boxW / 2, anchorY + pinRadius + 7);
+    }
+    if (dir === 'right') {
+      return clampRect(anchorX + pinRadius + 8, anchorY - boxH / 2);
+    }
+    return clampRect(anchorX - pinRadius - boxW - 8, anchorY - boxH / 2);
+  });
+
+  for (const cand of candidates) {
+    if (!occupied.some((occ) => rectsOverlap(cand, occ))) {
+      occupied.push(cand);
+      return cand;
+    }
+  }
+
+  const fallback = { ...candidates[0] };
+  for (let step = 1; step <= 4; step++) {
+    const shiftedUp = clampRect(fallback.x, fallback.y - step * (boxH + 4));
+    if (!occupied.some((occ) => rectsOverlap(shiftedUp, occ))) {
+      occupied.push(shiftedUp);
+      return shiftedUp;
+    }
+    const shiftedDown = clampRect(fallback.x, anchorY + pinRadius + 7 + step * (boxH + 4));
+    if (!occupied.some((occ) => rectsOverlap(shiftedDown, occ))) {
+      occupied.push(shiftedDown);
+      return shiftedDown;
+    }
+  }
+
+  occupied.push(fallback);
+  return fallback;
+}
+
 interface UserAvatarProps {
   src?: string;
   name: string;
@@ -321,7 +403,7 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
   const sensorCleanupRef = useRef<(() => void) | null>(null);
   const shakeHintTimerRef = useRef<number | null>(null);
 
-  // Viewport size & interactive pan/zoom camera
+  // Viewport size, 2D/2.5D architectural tilt & interactive pan/zoom camera
   const [viewportSize, setViewportSize] = useState<{ width: number; height: number }>({
     width: 960,
     height: 700,
@@ -331,7 +413,20 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
     panX: 80,
     panY: 40,
   });
-  const cameraInitializedRef = useRef(false);
+  const [is25DMode, setIs25DMode] = useState(false);
+  const cameraRef = useRef<MapCamera>(camera);
+  const cameraAnimRef = useRef<number | null>(null);
+  const focusHighlightRef = useRef<{
+    x: number;
+    y: number;
+    color: string;
+    until: number;
+  } | null>(null);
+  const isManualCameraRef = useRef(false);
+
+  useEffect(() => {
+    cameraRef.current = camera;
+  }, [camera]);
 
   // Pointer & Touch gesture tracking for smooth pan/pinch-zoom without breaking tap selection
   const pointerStateRef = useRef<{
@@ -459,8 +554,8 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
     y: 12.5,
     floor: 1,
     heading: 90,
-    stepCount: 142,
-    totalDistanceMeters: 92.4,
+    stepCount: 0,
+    totalDistanceMeters: 0,
     accuracy: 1.0,
   });
 
@@ -624,57 +719,157 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
     };
   }, [presenceProfile, localPresenceTabId, deviceType, currentUser.avatarUrl]);
 
-  // Compute camera that fits the entire Floor 1 neatly inside any viewport (portrait phone or wide desktop)
+  // Compute camera that fits the entire Floor 1 dead-center inside any viewport with full-bleed presence
   const computeFitCamera = useCallback((w: number, h: number): MapCamera => {
     const isCompact = w < 640;
-    const padX = isCompact ? 20 : 56;
-    const padTop = isCompact ? 28 : 96;
-    const padBottom = isCompact ? 28 : 56;
+    const isTablet = w >= 640 && w < 1024;
+    const padX = isCompact ? 12 : isTablet ? 24 : 40;
+    const padTop = isCompact ? 62 : 70;
+    const padBottom = isCompact ? 16 : 36;
     const availW = Math.max(160, w - padX * 2);
     const availH = Math.max(160, h - padTop - padBottom);
     const scale = Math.max(
       10,
-      Math.min(44, Math.min(availW / WORLD_BOUNDS.width, availH / WORLD_BOUNDS.height))
+      Math.min(46, Math.min(availW / WORLD_BOUNDS.width, availH / WORLD_BOUNDS.height))
     );
     const panX = w / 2 - WORLD_BOUNDS.centerX * scale;
     const panY = padTop + availH / 2 - WORLD_BOUNDS.centerY * scale;
     return { scale, panX, panY };
   }, []);
 
+  const clampCameraPan = useCallback(
+    (cam: MapCamera, w: number, h: number): MapCamera => {
+      const fit = computeFitCamera(w, h);
+      if (cam.scale <= fit.scale * 1.03) {
+        return fit;
+      }
+      const marginX = w * 0.35;
+      const marginY = h * 0.35;
+      const minPanX = marginX - WORLD_BOUNDS.maxX * cam.scale;
+      const maxPanX = w - marginX - WORLD_BOUNDS.minX * cam.scale;
+      const minPanY = marginY - WORLD_BOUNDS.maxY * cam.scale;
+      const maxPanY = h - marginY - WORLD_BOUNDS.minY * cam.scale;
+      return {
+        scale: cam.scale,
+        panX: Math.max(minPanX, Math.min(maxPanX, cam.panX)),
+        panY: Math.max(minPanY, Math.min(maxPanY, cam.panY)),
+      };
+    },
+    [computeFitCamera]
+  );
+
+  const cancelCameraAnimation = useCallback(() => {
+    if (cameraAnimRef.current !== null) {
+      cancelAnimationFrame(cameraAnimRef.current);
+      cameraAnimRef.current = null;
+    }
+  }, []);
+
+  const animateCameraTo = useCallback(
+    (targetCam: MapCamera) => {
+      cancelCameraAnimation();
+      const clampedTarget = clampCameraPan(
+        targetCam,
+        viewportSize.width,
+        viewportSize.height
+      );
+      const prefersReduced =
+        typeof window !== 'undefined' &&
+        window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+      if (prefersReduced) {
+        setCamera(clampedTarget);
+        return;
+      }
+
+      const startCam = { ...cameraRef.current };
+      const startTime = performance.now();
+      const durationMs = 340;
+
+      const step = (now: number) => {
+        const t = Math.min(1, (now - startTime) / durationMs);
+        const eased = 1 - Math.pow(1 - t, 3);
+        setCamera({
+          scale: startCam.scale + (clampedTarget.scale - startCam.scale) * eased,
+          panX: startCam.panX + (clampedTarget.panX - startCam.panX) * eased,
+          panY: startCam.panY + (clampedTarget.panY - startCam.panY) * eased,
+        });
+        if (t < 1) {
+          cameraAnimRef.current = requestAnimationFrame(step);
+        } else {
+          cameraAnimRef.current = null;
+        }
+      };
+
+      cameraAnimRef.current = requestAnimationFrame(step);
+    },
+    [cancelCameraAnimation, clampCameraPan, viewportSize.width, viewportSize.height]
+  );
+
+  useEffect(() => {
+    return () => cancelCameraAnimation();
+  }, [cancelCameraAnimation]);
+
+  const focusMapOnPoint = useCallback(
+    (worldX: number, worldY: number, highlightColor = '#38BDF8') => {
+      isManualCameraRef.current = true;
+      const targetScale = Math.max(
+        cameraRef.current.scale,
+        viewportSize.width < 640 ? 24 : 30
+      );
+      focusHighlightRef.current = {
+        x: worldX,
+        y: worldY,
+        color: highlightColor,
+        until: Date.now() + 1600,
+      };
+      animateCameraTo({
+        scale: targetScale,
+        panX: viewportSize.width / 2 - worldX * targetScale,
+        panY: viewportSize.height / 2 - worldY * targetScale,
+      });
+    },
+    [animateCameraTo, viewportSize.width, viewportSize.height]
+  );
+
   const fitFloorPlan = useCallback(() => {
-    setCamera(computeFitCamera(viewportSize.width, viewportSize.height));
-  }, [computeFitCamera, viewportSize.width, viewportSize.height]);
+    isManualCameraRef.current = false;
+    animateCameraTo(computeFitCamera(viewportSize.width, viewportSize.height));
+  }, [animateCameraTo, computeFitCamera, viewportSize.width, viewportSize.height]);
 
   const centerOnUser = useCallback(() => {
-    setCamera((prev) => {
-      const targetScale = Math.max(prev.scale, viewportSize.width < 640 ? 22 : 28);
-      return {
-        scale: targetScale,
-        panX: viewportSize.width / 2 - userPose.x * targetScale,
-        panY: viewportSize.height / 2 - userPose.y * targetScale,
-      };
-    });
-  }, [userPose.x, userPose.y, viewportSize.width, viewportSize.height]);
+    focusMapOnPoint(userPose.x, userPose.y, '#3B82F6');
+  }, [focusMapOnPoint, userPose.x, userPose.y]);
 
   const zoomBy = useCallback(
     (factor: number, focusX?: number, focusY?: number) => {
+      cancelCameraAnimation();
+      const fit = computeFitCamera(viewportSize.width, viewportSize.height);
       setCamera((prev) => {
-        const nextScale = Math.max(10, Math.min(72, prev.scale * factor));
+        const nextScale = Math.max(fit.scale, Math.min(72, prev.scale * factor));
+        if (nextScale <= fit.scale * 1.03) {
+          isManualCameraRef.current = false;
+          return fit;
+        }
+        isManualCameraRef.current = true;
         const fx = focusX ?? viewportSize.width / 2;
         const fy = focusY ?? viewportSize.height / 2;
         const worldX = (fx - prev.panX) / prev.scale;
         const worldY = (fy - prev.panY) / prev.scale;
-        return {
-          scale: nextScale,
-          panX: fx - worldX * nextScale,
-          panY: fy - worldY * nextScale,
-        };
+        return clampCameraPan(
+          {
+            scale: nextScale,
+            panX: fx - worldX * nextScale,
+            panY: fy - worldY * nextScale,
+          },
+          viewportSize.width,
+          viewportSize.height
+        );
       });
     },
-    [viewportSize.width, viewportSize.height]
+    [cancelCameraAnimation, viewportSize.width, viewportSize.height, computeFitCamera, clampCameraPan]
   );
 
-  // Measure map viewport via ResizeObserver so canvas fills 100% of screen on any phone or desktop
+  // Keep map locked dead-center across viewport resizes unless user intentionally zoomed in
   useEffect(() => {
     const el = mapContainerRef.current;
     if (!el) return;
@@ -685,9 +880,10 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
         const w = Math.round(rect.width);
         const h = Math.round(rect.height);
         setViewportSize({ width: w, height: h });
-        if (!cameraInitializedRef.current) {
-          cameraInitializedRef.current = true;
+        if (!isManualCameraRef.current) {
           setCamera(computeFitCamera(w, h));
+        } else {
+          setCamera((prev) => clampCameraPan(prev, w, h));
         }
       }
     };
@@ -696,7 +892,7 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
     const observer = new ResizeObserver(updateSize);
     observer.observe(el);
     return () => observer.disconnect();
-  }, [computeFitCamera]);
+  }, [computeFitCamera, clampCameraPan]);
 
   // Detect Web Bluetooth availability & previously paired devices
   useEffect(() => {
@@ -1670,44 +1866,103 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
     ctx.save();
     ctx.scale(dpr, dpr);
 
-    // 1. Deep Obsidian Survey Backdrop
-    ctx.fillStyle = '#080C14';
-    ctx.fillRect(0, 0, viewW, viewH);
+    // 1. Transparent Canvas Stage over Full-Bleed Engineering Coordinate Grid
+    ctx.clearRect(0, 0, viewW, viewH);
 
-    // Subtle survey coordinate dots outside building
     const { scale, panX, panY } = camera;
-    const stepPx = scale * 2;
-    if (stepPx >= 16) {
-      ctx.fillStyle = 'rgba(148, 163, 184, 0.12)';
-      const startX = ((panX % stepPx) + stepPx) % stepPx;
-      const startY = ((panY % stepPx) + stepPx) % stepPx;
-      for (let gx = startX; gx < viewW; gx += stepPx) {
-        for (let gy = startY; gy < viewH; gy += stepPx) {
-          ctx.fillRect(gx - 0.75, gy - 0.75, 1.5, 1.5);
-        }
-      }
-    }
-
-    // Helper: World meters -> Screen px
     const wx = (mx: number) => panX + mx * scale;
     const wy = (my: number) => panY + my * scale;
+    const labelYScale = is25DMode ? 1.132 : 1;
 
-    // 2. Walkable Corridors & Main Concourse Pavement (Visibly lighter than enclosed rooms!)
     const bx = wx(WORLD_BOUNDS.minX);
     const by = wy(WORLD_BOUNDS.minY);
     const bw = WORLD_BOUNDS.width * scale;
     const bh = WORLD_BOUNDS.height * scale;
 
+    // Subtle building architectural floor elevation shadow
+    ctx.save();
+    ctx.shadowColor = 'rgba(0, 0, 0, 0.72)';
+    ctx.shadowBlur = is25DMode ? 48 : 36;
+    ctx.shadowOffsetY = is25DMode ? 22 : 12;
+    ctx.fillStyle = '#0B111C';
+    ctx.beginPath();
+    ctx.roundRect(bx, by, bw, bh, 4);
+    ctx.fill();
+    ctx.restore();
+
+    // Track occupied label boxes so markers & room titles never collide
+    const occupiedLabels: LabelRect[] = [];
+
+    // Helper: Draw tiny vector micro-icon badge for each functional room zone
+    const drawRoomMicroIcon = (roomId: string, cx: number, cy: number, color: string) => {
+      ctx.save();
+      ctx.translate(cx, cy);
+      ctx.scale(1, labelYScale);
+      ctx.strokeStyle = color;
+      ctx.fillStyle = color;
+      ctx.lineWidth = 1.25;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+
+      if (roomId === 'room_101') {
+        // Lab 101: Precision conical flask
+        ctx.beginPath();
+        ctx.moveTo(-2, -4.5);
+        ctx.lineTo(2, -4.5);
+        ctx.moveTo(-1.3, -4.5);
+        ctx.lineTo(-1.3, -1.5);
+        ctx.lineTo(-4.2, 3.8);
+        ctx.lineTo(4.2, 3.8);
+        ctx.lineTo(1.3, -1.5);
+        ctx.lineTo(1.3, -4.5);
+        ctx.stroke();
+      } else if (roomId === 'room_105') {
+        // Server Hub: Dual rack blades + LED dot
+        ctx.strokeRect(-4.5, -4, 9, 3.2);
+        ctx.strokeRect(-4.5, 0.8, 9, 3.2);
+        ctx.fillRect(-3, -2.8, 1.4, 1);
+        ctx.fillRect(-3, 2, 1.4, 1);
+      } else if (roomId === 'room_102') {
+        // Conference Room A: Presentation board
+        ctx.strokeRect(-4.5, -4, 9, 5.6);
+        ctx.beginPath();
+        ctx.moveTo(0, 1.6);
+        ctx.lineTo(0, 4.2);
+        ctx.moveTo(-2.5, 4.2);
+        ctx.lineTo(2.5, 4.2);
+        ctx.stroke();
+      } else if (roomId === 'room_103') {
+        // Cafeteria: Coffee cup + handle
+        ctx.beginPath();
+        ctx.roundRect(-4.2, -1.8, 6.4, 5.6, 1.4);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.arc(2.2, 0.8, 1.8, -Math.PI / 2, Math.PI / 2);
+        ctx.stroke();
+      } else if (roomId === 'room_104') {
+        // Executive Suite: Briefcase / shield
+        ctx.strokeRect(-4.5, -2.2, 9, 6);
+        ctx.beginPath();
+        ctx.moveTo(-2, -2.2);
+        ctx.lineTo(-2, -4);
+        ctx.lineTo(2, -4);
+        ctx.lineTo(2, -2.2);
+        ctx.stroke();
+      }
+      ctx.restore();
+    };
+
+    // 2. Walkable Corridors & Main Concourse Pavement
     ctx.save();
     ctx.beginPath();
     ctx.rect(bx, by, bw, bh);
     ctx.clip();
 
     // Lit architectural terrazzo corridor floor
-    ctx.fillStyle = '#1E293B';
+    ctx.fillStyle = '#182235';
     ctx.fillRect(bx, by, bw, bh);
 
-    // Subtle 2m x 2m floor tile lines across walkable corridors
+    // Subtle 2m x 2m architectural slab grid across walkable corridors
     ctx.strokeStyle = 'rgba(148, 163, 184, 0.06)';
     ctx.lineWidth = 1;
     for (let mx = WORLD_BOUNDS.minX; mx <= WORLD_BOUNDS.maxX; mx += 2) {
@@ -1725,17 +1980,15 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
       ctx.stroke();
     }
 
-    // Subtle corridor circulation centerline guides (dashed architectural lane markers)
-    ctx.strokeStyle = 'rgba(148, 163, 184, 0.12)';
+    // Subtle corridor circulation centerline guides
+    ctx.strokeStyle = 'rgba(148, 163, 184, 0.13)';
     ctx.lineWidth = Math.max(1, scale * 0.04);
     ctx.setLineDash([6, 8]);
-    // East-West concourse axis
     ctx.beginPath();
     ctx.moveTo(wx(2.0), wy(12.5));
     ctx.lineTo(wx(13.0), wy(12.5));
     ctx.moveTo(wx(19.0), wy(12.5));
     ctx.lineTo(wx(30.0), wy(12.5));
-    // North-South corridor axis
     ctx.moveTo(wx(16.0), wy(4.8));
     ctx.lineTo(wx(16.0), wy(10.0));
     ctx.moveTo(wx(16.0), wy(15.0));
@@ -1745,18 +1998,53 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
 
     // Corridor & Lobby Architectural Zone Labels
     if (scale >= 11) {
-      const hallFont = Math.max(8.5, Math.min(11, scale * 0.34));
-      ctx.fillStyle = 'rgba(148, 163, 184, 0.42)';
+      const hallFont = Math.max(8, Math.min(10.5, scale * 0.31));
+      ctx.fillStyle = 'rgba(148, 163, 184, 0.44)';
       ctx.font = `600 ${hallFont}px "JetBrains Mono", monospace`;
       ctx.textAlign = 'center';
-      ctx.fillText('NORTH CORRIDOR', wx(16.0), wy(7.1));
-      ctx.fillText('SOUTH LOBBY', wx(16.0), wy(21.8));
-      ctx.fillText('WEST CONCOURSE', wx(7.0), wy(14.3));
-      ctx.fillText('EAST CONCOURSE', wx(25.0), wy(14.3));
+      const drawHallLabel = (text: string, mx: number, my: number) => {
+        ctx.save();
+        ctx.translate(wx(mx), wy(my));
+        ctx.scale(1, labelYScale);
+        ctx.fillText(text, 0, 0);
+        ctx.restore();
+      };
+      drawHallLabel('NORTH CORRIDOR', 16.0, 7.1);
+      drawHallLabel('SOUTH LOBBY', 16.0, 21.8);
+      drawHallLabel('WEST CONCOURSE', 7.0, 14.3);
+      drawHallLabel('EAST CONCOURSE', 25.0, 14.3);
       ctx.textAlign = 'left';
     }
 
-    // 3. Enclosed Rooms, Recessed Floor Surfaces & CAD Furniture Context
+    // 3. Enclosed Rooms, Distinct Functional Ambient Tints, CAD Fixtures & Micro-Icon Badges
+    const ROOM_ACCENTS: Record<string, { fill: string; badgeBg: string; stroke: string }> = {
+      room_101: {
+        fill: 'rgba(14, 165, 233, 0.085)',
+        badgeBg: 'rgba(56, 189, 248, 0.14)',
+        stroke: '#38BDF8',
+      },
+      room_105: {
+        fill: 'rgba(16, 185, 129, 0.085)',
+        badgeBg: 'rgba(52, 211, 153, 0.14)',
+        stroke: '#34D399',
+      },
+      room_102: {
+        fill: 'rgba(139, 92, 246, 0.08)',
+        badgeBg: 'rgba(167, 139, 250, 0.14)',
+        stroke: '#A78BFA',
+      },
+      room_103: {
+        fill: 'rgba(245, 158, 11, 0.08)',
+        badgeBg: 'rgba(251, 191, 36, 0.14)',
+        stroke: '#FBBF24',
+      },
+      room_104: {
+        fill: 'rgba(234, 179, 8, 0.065)',
+        badgeBg: 'rgba(250, 204, 21, 0.12)',
+        stroke: '#FACC15',
+      },
+    };
+
     FLOOR_ROOMS.forEach((r) => {
       const rx = wx(r.x);
       const ry = wy(r.y);
@@ -1765,106 +2053,228 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
       const isRoomTarget = targetRoomId === r.id;
       const isAtrium = r.id === 'corr_center';
 
-      ctx.fillStyle = isRoomTarget
-        ? 'rgba(56, 189, 248, 0.14)'
-        : isAtrium
-          ? '#172236'
-          : '#111827';
+      // Base room slab
+      ctx.fillStyle = isAtrium ? '#152136' : '#0F1624';
       ctx.fillRect(rx, ry, rw, rh);
 
-      // Subtle architectural room furniture & structural inlays (low-contrast CAD layer)
-      ctx.strokeStyle = 'rgba(148, 163, 184, 0.13)';
+      // Subtle ambient zone micro-tint
+      const accent = ROOM_ACCENTS[r.id];
+      if (isRoomTarget) {
+        ctx.fillStyle = 'rgba(56, 189, 248, 0.15)';
+        ctx.fillRect(rx, ry, rw, rh);
+      } else if (accent) {
+        ctx.fillStyle = accent.fill;
+        ctx.fillRect(rx, ry, rw, rh);
+      }
+
+      // Atrium skylight glow + concentric floor tile rings + subtle BLE signal waves
+      if (isAtrium) {
+        const atriumGlow = ctx.createRadialGradient(
+          wx(16.0),
+          wy(12.5),
+          0,
+          wx(16.0),
+          wy(12.5),
+          Math.max(rw, rh) * 0.62
+        );
+        atriumGlow.addColorStop(0, 'rgba(56, 189, 248, 0.13)');
+        atriumGlow.addColorStop(1, 'rgba(56, 189, 248, 0)');
+        ctx.fillStyle = atriumGlow;
+        ctx.fillRect(rx, ry, rw, rh);
+      }
+
+      // Subtle architectural room furniture & structural inlays
+      ctx.strokeStyle = 'rgba(148, 163, 184, 0.15)';
       ctx.fillStyle = 'rgba(148, 163, 184, 0.045)';
       ctx.lineWidth = Math.max(1, scale * 0.04);
 
       if (r.id === 'room_101') {
-        // Two Lab workbenches on west wall + corner instrumentation desk
-        ctx.fillRect(wx(2.0), wy(3.2), 2.3 * scale, 1.1 * scale);
-        ctx.strokeRect(wx(2.0), wy(3.2), 2.3 * scale, 1.1 * scale);
-        ctx.fillRect(wx(2.0), wy(5.6), 2.3 * scale, 1.1 * scale);
-        ctx.strokeRect(wx(2.0), wy(5.6), 2.3 * scale, 1.1 * scale);
-        ctx.fillRect(wx(8.2), wy(1.7), 2.0 * scale, 1.2 * scale);
-        ctx.strokeRect(wx(8.2), wy(1.7), 2.0 * scale, 1.2 * scale);
+        ctx.fillRect(wx(2.0), wy(3.3), 2.3 * scale, 1.05 * scale);
+        ctx.strokeRect(wx(2.0), wy(3.3), 2.3 * scale, 1.05 * scale);
+        ctx.fillRect(wx(2.0), wy(5.7), 2.3 * scale, 1.05 * scale);
+        ctx.strokeRect(wx(2.0), wy(5.7), 2.3 * scale, 1.05 * scale);
+        ctx.fillRect(wx(8.2), wy(1.7), 2.0 * scale, 1.15 * scale);
+        ctx.strokeRect(wx(8.2), wy(1.7), 2.0 * scale, 1.15 * scale);
       } else if (r.id === 'room_102') {
-        // Boardroom oval table in upper-right clear of peer pin (26, 5)
         ctx.beginPath();
-        ctx.roundRect(wx(24.0), wy(2.0), 4.6 * scale, 1.6 * scale, 0.75 * scale);
+        ctx.roundRect(wx(24.0), wy(6.1), 4.6 * scale, 1.55 * scale, 0.72 * scale);
         ctx.fill();
         ctx.stroke();
-        // Chair ticks along top & bottom of table
         for (let cx = 24.7; cx <= 28.0; cx += 1.1) {
           ctx.beginPath();
-          ctx.arc(wx(cx), wy(1.75), 0.18 * scale, 0, Math.PI * 2);
-          ctx.arc(wx(cx), wy(3.85), 0.18 * scale, 0, Math.PI * 2);
+          ctx.arc(wx(cx), wy(5.85), 0.16 * scale, 0, Math.PI * 2);
+          ctx.arc(wx(cx), wy(7.9), 0.16 * scale, 0, Math.PI * 2);
           ctx.stroke();
         }
       } else if (r.id === 'room_105') {
-        // 3 Server rack bays along north wall
         for (const sx of [13.9, 15.5, 17.1]) {
-          ctx.fillRect(wx(sx), wy(1.45), 1.0 * scale, 0.65 * scale);
-          ctx.strokeRect(wx(sx), wy(1.45), 1.0 * scale, 0.65 * scale);
+          ctx.fillRect(wx(sx), wy(1.35), 1.0 * scale, 0.58 * scale);
+          ctx.strokeRect(wx(sx), wy(1.35), 1.0 * scale, 0.58 * scale);
+          if (scale >= 14) {
+            ctx.fillStyle = 'rgba(52, 211, 153, 0.7)';
+            ctx.fillRect(wx(sx + 0.18), wy(1.56), 0.15 * scale, 0.15 * scale);
+            ctx.fillStyle = 'rgba(148, 163, 184, 0.045)';
+          }
         }
       } else if (r.id === 'room_103') {
-        // 3 circular cafe tables clear of peer pin (6, 20)
         for (const [tx, ty] of [
-          [2.7, 18.6],
-          [2.7, 21.8],
+          [2.7, 19.0],
+          [2.7, 22.0],
           [8.4, 22.1],
         ]) {
           ctx.beginPath();
-          ctx.arc(wx(tx), wy(ty), 0.68 * scale, 0, Math.PI * 2);
+          ctx.arc(wx(tx), wy(ty), 0.66 * scale, 0, Math.PI * 2);
           ctx.fill();
           ctx.stroke();
         }
       } else if (r.id === 'room_104') {
-        // Executive L-desk along east wall + lounge corner table clear of (26, 20)
-        ctx.fillRect(wx(28.5), wy(18.0), 1.5 * scale, 4.0 * scale);
-        ctx.strokeRect(wx(28.5), wy(18.0), 1.5 * scale, 4.0 * scale);
+        ctx.fillRect(wx(28.5), wy(18.2), 1.5 * scale, 4.0 * scale);
+        ctx.strokeRect(wx(28.5), wy(18.2), 1.5 * scale, 4.0 * scale);
         ctx.beginPath();
-        ctx.arc(wx(23.3), wy(22.1), 0.65 * scale, 0, Math.PI * 2);
+        ctx.arc(wx(23.3), wy(22.1), 0.62 * scale, 0, Math.PI * 2);
         ctx.fill();
         ctx.stroke();
       } else if (isAtrium) {
-        // Central Atrium architectural medallion & 4 structural columns
+        // Concentric architectural tile rings + subtle center BLE signal wave rings
+        ctx.strokeStyle = 'rgba(148, 163, 184, 0.16)';
         ctx.beginPath();
-        ctx.arc(wx(16.0), wy(12.5), 1.85 * scale, 0, Math.PI * 2);
+        ctx.arc(wx(16.0), wy(12.5), 2.15 * scale, 0, Math.PI * 2);
         ctx.stroke();
+        ctx.beginPath();
+        ctx.arc(wx(16.0), wy(12.5), 1.35 * scale, 0, Math.PI * 2);
+        ctx.stroke();
+
+        ctx.strokeStyle = `rgba(56, 189, 248, ${0.24 * (1 - pulseAnim)})`;
+        ctx.lineWidth = 1.25;
+        ctx.beginPath();
+        ctx.arc(wx(16.0), wy(12.5), (0.9 + pulseAnim * 1.45) * scale, 0, Math.PI * 2);
+        ctx.stroke();
+
         for (const [colX, colY] of [
           [13.45, 10.45],
           [18.25, 10.45],
           [13.45, 14.25],
           [18.25, 14.25],
         ]) {
-          ctx.fillStyle = 'rgba(100, 116, 139, 0.35)';
+          ctx.fillStyle = 'rgba(148, 163, 184, 0.32)';
           ctx.fillRect(wx(colX), wy(colY), 0.3 * scale, 0.3 * scale);
         }
       }
 
       if (isRoomTarget) {
-        ctx.strokeStyle = 'rgba(56, 189, 248, 0.45)';
-        ctx.lineWidth = 1.5;
+        ctx.strokeStyle = 'rgba(56, 189, 248, 0.65)';
+        ctx.lineWidth = 1.8;
         ctx.strokeRect(rx + 1, ry + 1, rw - 2, rh - 2);
       }
 
-      // Room Typography
-      const labelFontSize = Math.max(10, Math.min(13.5, scale * 0.44));
-      const codeFontSize = Math.max(8.5, Math.min(10.5, scale * 0.34));
-      const labelPadX = Math.max(8, scale * 0.45);
-      const labelPadY = Math.max(16, scale * 0.85);
+      // Zero-Clip Room Typography + Micro-Icon Badge
+      const labelPadX = Math.max(7, scale * 0.42);
+      const showIconBadge = !isAtrium && scale >= 15 && rw >= 95;
+      const badgeSize = showIconBadge ? 18 : 0;
+      const badgeGap = showIconBadge ? 7 : 0;
+      const textStartX = rx + labelPadX + badgeSize + badgeGap;
+      const maxLabelW = Math.max(24, rw - labelPadX * 2 - badgeSize - badgeGap);
+      const baseLabelFont = Math.max(9.5, Math.min(13, scale * 0.41));
+      const codeFontSize = Math.max(8, Math.min(10, scale * 0.3));
 
-      ctx.fillStyle = isRoomTarget ? '#7DD3FC' : '#E2E8F0';
-      ctx.font = `600 ${labelFontSize}px "Plus Jakarta Sans", system-ui, sans-serif`;
-      ctx.fillText(r.name, rx + labelPadX, ry + labelPadY);
+      if (isAtrium) {
+        const atriumFont = Math.max(8, Math.min(10, scale * 0.31));
+        ctx.font = `700 ${atriumFont}px "JetBrains Mono", monospace`;
+        const atriumTitle = 'CENTRAL ATRIUM';
+        const tw = ctx.measureText(atriumTitle).width;
+        const tx = rx + rw / 2;
+        const ty = ry + Math.max(13, scale * 0.54);
+        ctx.fillStyle = 'rgba(148, 163, 184, 0.78)';
+        ctx.textAlign = 'center';
+        ctx.save();
+        ctx.translate(tx, ty);
+        ctx.scale(1, labelYScale);
+        ctx.fillText(atriumTitle, 0, 0, maxLabelW);
+        ctx.restore();
+        ctx.textAlign = 'left';
+        occupiedLabels.push({
+          x: tx - Math.min(tw, maxLabelW) / 2 - 2,
+          y: ty - atriumFont,
+          w: Math.min(tw, maxLabelW) + 4,
+          h: atriumFont + 4,
+        });
+      } else {
+        const labelPadY =
+          r.id === 'room_105'
+            ? Math.max(24, scale * 1.38)
+            : Math.max(16, scale * 0.8);
+        ctx.font = `600 ${baseLabelFont}px "Plus Jakarta Sans", system-ui, sans-serif`;
 
-      const code = ROOM_CODES[r.id];
-      if (code && scale >= 14 && !isAtrium) {
-        ctx.fillStyle = '#64748B';
-        ctx.font = `500 ${codeFontSize}px "JetBrains Mono", monospace`;
-        ctx.fillText(`RM ${code}`, rx + labelPadX, ry + labelPadY + codeFontSize + 5);
+        let lines: string[] = [r.name];
+        let actualFont = baseLabelFont;
+        const measuredFull = ctx.measureText(r.name).width;
+        if (measuredFull > maxLabelW) {
+          const words = r.name.split(' ');
+          if (words.length >= 2 && r.h >= 5) {
+            const splitIdx = Math.ceil(words.length / 2);
+            const l1 = words.slice(0, splitIdx).join(' ');
+            const l2 = words.slice(splitIdx).join(' ');
+            const widest = Math.max(ctx.measureText(l1).width, ctx.measureText(l2).width);
+            if (widest > maxLabelW) {
+              actualFont = Math.max(8, baseLabelFont * (maxLabelW / widest) * 0.94);
+            }
+            lines = [l1, l2];
+          } else {
+            actualFont = Math.max(8, baseLabelFont * (maxLabelW / measuredFull) * 0.94);
+          }
+        }
+
+        if (showIconBadge && accent) {
+          const badgeX = rx + labelPadX;
+          const badgeY = ry + labelPadY - actualFont * 0.92;
+          ctx.fillStyle = accent.badgeBg;
+          ctx.beginPath();
+          ctx.roundRect(badgeX, badgeY, badgeSize, badgeSize, 5);
+          ctx.fill();
+          ctx.strokeStyle = `${accent.stroke}55`;
+          ctx.lineWidth = 1;
+          ctx.stroke();
+          drawRoomMicroIcon(r.id, badgeX + badgeSize / 2, badgeY + badgeSize / 2, accent.stroke);
+        }
+
+        ctx.fillStyle = isRoomTarget ? '#7DD3FC' : '#E2E8F0';
+        ctx.font = `600 ${actualFont}px "Plus Jakarta Sans", system-ui, sans-serif`;
+
+        let maxLineW = 0;
+        lines.forEach((line, idx) => {
+          const ly = ry + labelPadY + idx * (actualFont + 2);
+          ctx.save();
+          ctx.translate(textStartX, ly);
+          ctx.scale(1, labelYScale);
+          ctx.fillText(line, 0, 0, maxLabelW);
+          ctx.restore();
+          maxLineW = Math.max(maxLineW, Math.min(maxLabelW, ctx.measureText(line).width));
+        });
+
+        const code = ROOM_CODES[r.id];
+        let totalTextH = lines.length * (actualFont + 2);
+        if (code && scale >= 13) {
+          ctx.fillStyle = '#64748B';
+          ctx.font = `500 ${codeFontSize}px "JetBrains Mono", monospace`;
+          const codeY = ry + labelPadY + lines.length * (actualFont + 2) + 2;
+          ctx.save();
+          ctx.translate(textStartX, codeY);
+          ctx.scale(1, labelYScale);
+          ctx.fillText(`RM ${code}`, 0, 0, maxLabelW);
+          ctx.restore();
+          totalTextH += codeFontSize + 5;
+        }
+
+        occupiedLabels.push({
+          x: rx + labelPadX - 2,
+          y: ry + labelPadY - actualFont - 1,
+          w: badgeSize + badgeGap + maxLineW + 6,
+          h: Math.max(badgeSize, totalTextH) + 4,
+        });
       }
     });
 
-    // 4. Open Doorway Floor Thresholds & CAD Door-Swing Arcs
+    // 4. Open Doorway Floor Thresholds, Jamb Caps & CAD Door-Swing Arcs
     FLOOR_ROOMS.forEach((r) => {
       const rx = wx(r.x);
       const ry = wy(r.y);
@@ -1874,11 +2284,11 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
 
       r.doors.forEach((d) => {
         const doorLenPx = (d.end - d.start) * scale;
-        const swingR = Math.min(doorLenPx * 0.55, scale * 1.15);
+        const swingR = Math.min(doorLenPx * 0.56, scale * 1.18);
 
-        // Paint doorway threshold floor strip in corridor color so wall visibly opens
-        ctx.strokeStyle = '#1E293B';
-        ctx.lineWidth = Math.max(4, scale * 0.22);
+        // Doorway threshold floor strip matching corridor terrazzo
+        ctx.strokeStyle = '#182235';
+        ctx.lineWidth = Math.max(5, scale * 0.25);
         ctx.beginPath();
         if (d.side === 'top') {
           ctx.moveTo(wx(r.x + d.start), ry);
@@ -1895,8 +2305,8 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
         }
         ctx.stroke();
 
-        // Subtle dashed cyan threshold saddle line
-        ctx.strokeStyle = isAtrium ? 'rgba(56, 189, 248, 0.42)' : 'rgba(56, 189, 248, 0.32)';
+        // Crisp threshold guide line
+        ctx.strokeStyle = isAtrium ? 'rgba(56, 189, 248, 0.45)' : 'rgba(56, 189, 248, 0.34)';
         ctx.lineWidth = Math.max(1.2, scale * 0.05);
         ctx.setLineDash([4, 4]);
         ctx.beginPath();
@@ -1916,10 +2326,10 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
         ctx.stroke();
         ctx.setLineDash([]);
 
-        // Architectural CAD inward door swing arc on standard enclosed rooms
+        // Architectural CAD inward door swing arc + jamb caps
         if (!isAtrium && scale >= 12) {
-          ctx.strokeStyle = 'rgba(148, 163, 184, 0.28)';
-          ctx.lineWidth = 1.1;
+          ctx.strokeStyle = 'rgba(148, 163, 184, 0.32)';
+          ctx.lineWidth = 1.15;
           ctx.beginPath();
           if (d.side === 'top') {
             const hx = wx(r.x + d.start);
@@ -1943,36 +2353,60 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
             ctx.arc(rx + rw, hy, swingR, Math.PI, Math.PI / 2, true);
           }
           ctx.stroke();
+
+          ctx.fillStyle = '#94A3B8';
+          const jSize = 2.6;
+          if (d.side === 'top' || d.side === 'bottom') {
+            const jy = d.side === 'top' ? ry : ry + rh;
+            ctx.fillRect(wx(r.x + d.start) - jSize / 2, jy - jSize / 2, jSize, jSize);
+            ctx.fillRect(wx(r.x + d.end) - jSize / 2, jy - jSize / 2, jSize, jSize);
+          } else {
+            const jx = d.side === 'left' ? rx : rx + rw;
+            ctx.fillRect(jx - jSize / 2, wy(r.y + d.start) - jSize / 2, jSize, jSize);
+            ctx.fillRect(jx - jSize / 2, wy(r.y + d.end) - jSize / 2, jSize, jSize);
+          }
         }
       });
     });
 
-    // 5. Crisp Structural Partition Walls + Thick Exterior Envelope
+    // 5. Crisp Structural Partition Walls + Bevel Highlight
     ctx.lineCap = 'square';
     FLOOR_WALL_SEGMENTS.forEach((w, idx) => {
       const isOuter = idx < 4;
-      ctx.strokeStyle = isOuter ? '#64748B' : '#4E6382';
-      ctx.lineWidth = isOuter ? Math.max(3.2, scale * 0.17) : Math.max(2.2, scale * 0.12);
+      ctx.strokeStyle = isOuter ? '#7C93B0' : '#566F91';
+      ctx.lineWidth = isOuter ? Math.max(3.6, scale * 0.19) : Math.max(2.4, scale * 0.13);
       ctx.beginPath();
       ctx.moveTo(wx(w.x1), wy(w.y1));
       ctx.lineTo(wx(w.x2), wy(w.y2));
       ctx.stroke();
+
+      if (scale >= 14) {
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.08)';
+        ctx.lineWidth = 0.8;
+        ctx.beginPath();
+        ctx.moveTo(wx(w.x1), wy(w.y1));
+        ctx.lineTo(wx(w.x2), wy(w.y2));
+        ctx.stroke();
+      }
     });
 
     ctx.restore(); // Release building footprint clip
 
-    // Crisp outer perimeter frame stroke cleanly framing the building shell
-    ctx.strokeStyle = '#64748B';
-    ctx.lineWidth = Math.max(2.8, scale * 0.15);
+    // Crisp outer perimeter frame shell + inner architectural bevel
+    ctx.strokeStyle = '#879DBB';
+    ctx.lineWidth = Math.max(3.4, scale * 0.18);
     ctx.strokeRect(bx, by, bw, bh);
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.11)';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(bx + 1.5, by + 1.5, Math.max(1, bw - 3), Math.max(1, bh - 3));
 
-    // 6. 3-Layer High-Craft Wayfinding Path + Forward Directional Chevrons
+    // 6. Luminous Next-Gen A* Wayfinding Path + Travelling Directional Chevrons
     if (activeRoute && activeRoute.pathCoordinates.length > 1) {
       const coords = activeRoute.pathCoordinates;
 
-      // Layer A: Soft atmospheric sky-cyan glow
-      ctx.strokeStyle = 'rgba(56, 189, 248, 0.22)';
-      ctx.lineWidth = Math.max(9, scale * 0.38);
+      // Layer A: Soft luminous outer cyan glow
+      ctx.strokeStyle = 'rgba(56, 189, 248, 0.25)';
+      ctx.lineWidth = Math.max(10.5, scale * 0.44);
       ctx.lineCap = 'round';
       ctx.lineJoin = 'round';
       ctx.beginPath();
@@ -1980,30 +2414,37 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
       coords.forEach((c) => ctx.lineTo(wx(c.x), wy(c.y)));
       ctx.stroke();
 
-      // Layer B: Dark contrast casing separating route from corridor tiles & threshold lines
-      ctx.strokeStyle = '#09111E';
-      ctx.lineWidth = Math.max(4.5, scale * 0.21);
+      // Layer B: Dark contrast casing separating route cleanly from floor geometry
+      ctx.strokeStyle = '#070C16';
+      ctx.lineWidth = Math.max(5.0, scale * 0.23);
       ctx.beginPath();
       ctx.moveTo(wx(coords[0].x), wy(coords[0].y));
       coords.forEach((c) => ctx.lineTo(wx(c.x), wy(c.y)));
       ctx.stroke();
 
-      // Layer C: Bright animated directional route core
-      ctx.strokeStyle = '#38BDF8';
-      ctx.lineWidth = Math.max(2.6, scale * 0.12);
-      ctx.setLineDash([8, 6]);
-      ctx.lineDashOffset = -pulseAnim * 28;
+      // Layer C: Luminous solid core + gentle travelling energy pulse
+      ctx.strokeStyle = '#0EA5E9';
+      ctx.lineWidth = Math.max(2.8, scale * 0.13);
+      ctx.beginPath();
+      ctx.moveTo(wx(coords[0].x), wy(coords[0].y));
+      coords.forEach((c) => ctx.lineTo(wx(c.x), wy(c.y)));
+      ctx.stroke();
+
+      ctx.strokeStyle = '#7DD3FC';
+      ctx.lineWidth = Math.max(2.0, scale * 0.09);
+      ctx.setLineDash([12, 18]);
+      ctx.lineDashOffset = -pulseAnim * 30;
       ctx.beginPath();
       ctx.moveTo(wx(coords[0].x), wy(coords[0].y));
       coords.forEach((c) => ctx.lineTo(wx(c.x), wy(c.y)));
       ctx.stroke();
       ctx.setLineDash([]);
 
-      // Forward directional chevron arrowheads along path segments
-      const chevronSpacingM = 3.0;
-      const chevronSize = Math.max(4.5, Math.min(7.5, scale * 0.23));
-      ctx.strokeStyle = '#E0F2FE';
-      ctx.lineWidth = Math.max(1.6, scale * 0.075);
+      // Forward sliding directional chevron arrowheads along segments
+      const chevronSpacingM = 2.6;
+      const chevronSize = Math.max(4.6, Math.min(7.5, scale * 0.23));
+      ctx.strokeStyle = '#F0F9FF';
+      ctx.lineWidth = Math.max(1.7, scale * 0.075);
       ctx.lineCap = 'round';
       ctx.lineJoin = 'round';
 
@@ -2013,13 +2454,13 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
         const dx = coords[i + 1].x - ax;
         const dy = coords[i + 1].y - ay;
         const segLen = Math.hypot(dx, dy);
-        if (segLen < 1.8) continue;
+        if (segLen < 1.5) continue;
 
         const angle = Math.atan2(dy, dx);
-        const count = Math.floor(segLen / chevronSpacingM);
-        for (let k = 1; k <= count; k++) {
-          const frac = (k * chevronSpacingM) / (segLen + 0.5);
-          if (frac <= 0.15 || frac >= 0.88) continue;
+        const count = Math.max(1, Math.floor(segLen / chevronSpacingM));
+        for (let k = 0; k < count; k++) {
+          const frac = (k + pulseAnim) / count;
+          if (frac <= 0.12 || frac >= 0.9) continue;
           const cx = wx(ax + dx * frac);
           const cy = wy(ay + dy * frac);
 
@@ -2039,9 +2480,9 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
       for (let i = 1; i < coords.length - 1; i++) {
         const turnX = wx(coords[i].x);
         const turnY = wy(coords[i].y);
-        ctx.fillStyle = '#09111E';
+        ctx.fillStyle = '#070C16';
         ctx.beginPath();
-        ctx.arc(turnX, turnY, Math.max(3.5, scale * 0.15), 0, Math.PI * 2);
+        ctx.arc(turnX, turnY, Math.max(3.6, scale * 0.15), 0, Math.PI * 2);
         ctx.fill();
         ctx.strokeStyle = '#7DD3FC';
         ctx.lineWidth = 1.8;
@@ -2049,27 +2490,281 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
       }
     }
 
-    // Room target pin if navigating to a room
-    if (targetRoomId && activeTarget && !activeTarget.isPeer) {
+    // Destination beacon ring (Room or Peer arrival pulse)
+    if (activeTarget) {
       const tx = wx(activeTarget.coords.x);
       const ty = wy(activeTarget.coords.y);
-
-      ctx.strokeStyle = `rgba(56, 189, 248, ${0.8 * (1 - pulseAnim)})`;
-      ctx.lineWidth = 2.5;
+      ctx.strokeStyle = activeTarget.isPeer
+        ? `rgba(245, 158, 11, ${0.42 * (1 - pulseAnim)})`
+        : `rgba(56, 189, 248, ${0.8 * (1 - pulseAnim)})`;
+      ctx.lineWidth = 2;
       ctx.beginPath();
-      ctx.arc(tx, ty, 9 + pulseAnim * 20, 0, Math.PI * 2);
+      ctx.arc(tx, ty, 10 + pulseAnim * 20, 0, Math.PI * 2);
+      ctx.stroke();
+
+      if (targetRoomId && !activeTarget.isPeer) {
+        ctx.fillStyle = '#38BDF8';
+        ctx.beginPath();
+        ctx.arc(tx, ty, 7, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = '#FFFFFF';
+        ctx.lineWidth = 2.5;
+        ctx.stroke();
+      }
+    }
+
+    // 6.5 Subtle Hardware BLE Beacon Nodes (Always visible for spatial trilateration clarity)
+    beacons.forEach((b, idx) => {
+      const bxPos = wx(b.x);
+      const byPos = wy(b.y);
+      const dSize = Math.max(4.5, scale * 0.17);
+      const beaconPulse = (pulseAnim + idx * 0.25) % 1;
+
+      // Subtle pulsing BLE broadcast ring
+      ctx.strokeStyle = `rgba(56, 189, 248, ${(isSimulating || isTelemetryOpen ? 0.48 : 0.26) * (1 - beaconPulse)})`;
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      ctx.arc(bxPos, byPos, dSize + 2 + beaconPulse * (isSimulating ? 15 : 10), 0, Math.PI * 2);
+      ctx.stroke();
+
+      ctx.fillStyle = '#090E1A';
+      ctx.strokeStyle = isSimulating || isTelemetryOpen ? 'rgba(56, 189, 248, 0.9)' : 'rgba(56, 189, 248, 0.55)';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(bxPos, byPos - dSize);
+      ctx.lineTo(bxPos + dSize, byPos);
+      ctx.lineTo(bxPos, byPos + dSize);
+      ctx.lineTo(bxPos - dSize, byPos);
+      ctx.closePath();
+      ctx.fill();
       ctx.stroke();
 
       ctx.fillStyle = '#38BDF8';
       ctx.beginPath();
-      ctx.arc(tx, ty, 7, 0, Math.PI * 2);
+      ctx.arc(bxPos, byPos, 1.8, 0, Math.PI * 2);
+      ctx.fill();
+
+      if (scale >= 14) {
+        ctx.fillStyle = isSimulating || isTelemetryOpen ? 'rgba(125, 211, 252, 0.9)' : 'rgba(125, 211, 252, 0.55)';
+        ctx.font = '600 9px "JetBrains Mono", monospace';
+        ctx.save();
+        ctx.translate(bxPos + dSize + 4, byPos + 3);
+        ctx.scale(1, labelYScale);
+        ctx.fillText(b.id, 0, 0);
+        ctx.restore();
+      }
+    });
+
+    // Camera Focus Highlight Ripple when selecting user from list or dropdown
+    const focusFx = focusHighlightRef.current;
+    if (focusFx) {
+      const remainingMs = focusFx.until - Date.now();
+      if (remainingMs <= 0) {
+        focusHighlightRef.current = null;
+      } else {
+        const progress = 1 - remainingMs / 1600;
+        ctx.strokeStyle = focusFx.color;
+        ctx.globalAlpha = Math.max(0, 0.85 * (1 - progress));
+        ctx.lineWidth = 2.4;
+        ctx.beginPath();
+        ctx.arc(wx(focusFx.x), wy(focusFx.y), 14 + progress * 34, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+      }
+    }
+
+    // 7. Current User Position Radar Puck & Directional Heading Cone
+    const ux = wx(userPose.x);
+    const uy = wy(userPose.y);
+
+    ctx.fillStyle = 'rgba(59, 130, 246, 0.1)';
+    ctx.beginPath();
+    ctx.arc(ux, uy, userPose.accuracy * scale, 0, Math.PI * 2);
+    ctx.fill();
+
+    const headingRad = ((userPose.heading - 90) * Math.PI) / 180;
+    const coneRadius = Math.max(40, scale * 1.75);
+    const coneGrad = ctx.createRadialGradient(ux, uy, 4, ux, uy, coneRadius);
+    coneGrad.addColorStop(0, 'rgba(59, 130, 246, 0.48)');
+    coneGrad.addColorStop(1, 'rgba(59, 130, 246, 0.02)');
+    ctx.fillStyle = coneGrad;
+    ctx.beginPath();
+    ctx.moveTo(ux, uy);
+    ctx.arc(ux, uy, coneRadius, headingRad - 0.44, headingRad + 0.44);
+    ctx.closePath();
+    ctx.fill();
+
+    const isWallBlocked = Date.now() < wallHitUntilRef.current;
+
+    ctx.strokeStyle = isWallBlocked
+      ? 'rgba(244, 63, 94, 0.9)'
+      : `rgba(59, 130, 246, ${0.85 * (1 - pulseAnim)})`;
+    ctx.lineWidth = 2.4;
+    ctx.beginPath();
+    ctx.arc(ux, uy, 9 + pulseAnim * 21, 0, Math.PI * 2);
+    ctx.stroke();
+
+    const youAvatar = currentUser.avatarUrl
+      ? avatarImagesRef.current.get(currentUser.avatarUrl)
+      : undefined;
+    const youPinR = youAvatar instanceof HTMLImageElement ? 12 : 8.5;
+
+    if (youAvatar instanceof HTMLImageElement) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(ux, uy, youPinR, 0, Math.PI * 2);
+      ctx.clip();
+      ctx.drawImage(youAvatar, ux - youPinR, uy - youPinR, youPinR * 2, youPinR * 2);
+      ctx.restore();
+
+      ctx.strokeStyle = isWallBlocked ? '#F43F5E' : '#3B82F6';
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.arc(ux, uy, youPinR, 0, Math.PI * 2);
+      ctx.stroke();
+
+      ctx.strokeStyle = '#FFFFFF';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.arc(ux, uy, youPinR + 1.5, 0, Math.PI * 2);
+      ctx.stroke();
+    } else {
+      ctx.fillStyle = isWallBlocked ? '#F43F5E' : '#3B82F6';
+      ctx.beginPath();
+      ctx.arc(ux, uy, youPinR, 0, Math.PI * 2);
       ctx.fill();
       ctx.strokeStyle = '#FFFFFF';
       ctx.lineWidth = 2.5;
       ctx.stroke();
     }
 
-    // 6. Building Demo Bots (optional toggle) + Real-Time Connected Live Users
+    occupiedLabels.push({
+      x: ux - youPinR - 2,
+      y: uy - youPinR - 2,
+      w: (youPinR + 2) * 2,
+      h: (youPinR + 2) * 2,
+    });
+
+    const youText = presenceProfile ? `You · ${getShortPersonLabel(presenceProfile.name)}` : 'You';
+    ctx.font = '700 10.5px "Plus Jakarta Sans", system-ui, sans-serif';
+    const youBoxW = ctx.measureText(youText).width + 14;
+    const youBoxH = 20;
+    const youRect = placeNonOverlappingLabel(
+      ux,
+      uy,
+      youPinR,
+      youBoxW,
+      youBoxH,
+      viewW,
+      viewH,
+      occupiedLabels,
+      ['below', 'above', 'left', 'right']
+    );
+
+    ctx.save();
+    ctx.translate(youRect.x + youRect.w / 2, youRect.y + youRect.h / 2);
+    ctx.scale(1, labelYScale);
+    ctx.fillStyle = 'rgba(30, 58, 138, 0.96)';
+    ctx.beginPath();
+    ctx.roundRect(-youRect.w / 2, -youRect.h / 2, youRect.w, youRect.h, 6);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(147, 197, 253, 0.9)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    ctx.fillStyle = '#FFFFFF';
+    ctx.fillText(youText, -youRect.w / 2 + 7, -youRect.h / 2 + 13.5);
+    ctx.restore();
+
+    // 7.5 Live Connected Users (Vibrant High-Contrast Pins + LIVE Emerald Indicator)
+    liveUsers.forEach((lu) => {
+      const lx = wx(lu.x);
+      const ly = wy(lu.y);
+      const isTarget = targetLiveUserId === lu.id;
+
+      ctx.fillStyle = `${lu.color}30`;
+      ctx.beginPath();
+      ctx.arc(lx, ly, isTarget ? 16 + pulseAnim * 12 : 14, 0, Math.PI * 2);
+      ctx.fill();
+
+      if (isTarget) {
+        ctx.strokeStyle = lu.color;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(lx, ly, 10 + pulseAnim * 20, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+
+      const luAvatar = lu.avatarUrl ? avatarImagesRef.current.get(lu.avatarUrl) : undefined;
+      const luPinR = luAvatar instanceof HTMLImageElement ? 11.5 : 8;
+      if (luAvatar instanceof HTMLImageElement) {
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(lx, ly, luPinR, 0, Math.PI * 2);
+        ctx.clip();
+        ctx.drawImage(luAvatar, lx - luPinR, ly - luPinR, luPinR * 2, luPinR * 2);
+        ctx.restore();
+
+        ctx.strokeStyle = isTarget ? '#FFFFFF' : lu.color;
+        ctx.lineWidth = 2.5;
+        ctx.beginPath();
+        ctx.arc(lx, ly, luPinR, 0, Math.PI * 2);
+        ctx.stroke();
+      } else {
+        ctx.fillStyle = lu.color;
+        ctx.beginPath();
+        ctx.arc(lx, ly, luPinR, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = '#FFFFFF';
+        ctx.lineWidth = 2.5;
+        ctx.stroke();
+      }
+
+      occupiedLabels.push({
+        x: lx - luPinR - 1,
+        y: ly - luPinR - 1,
+        w: (luPinR + 1) * 2,
+        h: (luPinR + 1) * 2,
+      });
+
+      const tagText = lu.name;
+      ctx.font = '600 11px "Plus Jakarta Sans", system-ui, sans-serif';
+      const pillW = ctx.measureText(tagText).width + 24;
+      const pillH = 22;
+      const pillRect = placeNonOverlappingLabel(
+        lx,
+        ly,
+        luPinR,
+        pillW,
+        pillH,
+        viewW,
+        viewH,
+        occupiedLabels,
+        ['above', 'right', 'left', 'below']
+      );
+
+      ctx.save();
+      ctx.translate(pillRect.x + pillRect.w / 2, pillRect.y + pillRect.h / 2);
+      ctx.scale(1, labelYScale);
+      ctx.fillStyle = 'rgba(17, 22, 34, 0.96)';
+      ctx.beginPath();
+      ctx.roundRect(-pillRect.w / 2, -pillRect.h / 2, pillRect.w, pillRect.h, 6);
+      ctx.fill();
+      ctx.strokeStyle = isTarget ? '#FFFFFF' : `${lu.color}D0`;
+      ctx.lineWidth = 1.25;
+      ctx.stroke();
+
+      // Emerald LIVE dot inside tag
+      ctx.fillStyle = '#34D399';
+      ctx.beginPath();
+      ctx.arc(-pillRect.w / 2 + 8.5, 0, 2.7, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.fillStyle = '#F8FAFC';
+      ctx.fillText(tagText, -pillRect.w / 2 + 15, -pillRect.h / 2 + 14.5);
+      ctx.restore();
+    });
+
+    // 7.6 Building Demo Bots (Subtly Muted unless Targeted)
     displayedDemoBots.forEach((peer) => {
       const px = wx(peer.x);
       const py = wy(peer.y);
@@ -2092,140 +2787,73 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
 
         const labelText = peer.fullName;
         ctx.font = '600 11px "Plus Jakarta Sans", system-ui, sans-serif';
-        const textWidth = ctx.measureText(labelText).width;
-        const boxW = textWidth + 14;
+        const boxW = ctx.measureText(labelText).width + 14;
         const boxH = 22;
-        const boxX = Math.max(10, Math.min(viewW - boxW - 10, px - boxW / 2));
-        const boxY = Math.max(10, py - 34);
+        const labelRect = placeNonOverlappingLabel(
+          px,
+          py,
+          8,
+          boxW,
+          boxH,
+          viewW,
+          viewH,
+          occupiedLabels,
+          ['above', 'below', 'left', 'right']
+        );
 
-        ctx.fillStyle = 'rgba(17, 22, 34, 0.94)';
+        ctx.save();
+        ctx.translate(labelRect.x + labelRect.w / 2, labelRect.y + labelRect.h / 2);
+        ctx.scale(1, labelYScale);
+        ctx.fillStyle = 'rgba(17, 22, 34, 0.96)';
         ctx.beginPath();
-        ctx.roundRect(boxX, boxY, boxW, boxH, 6);
+        ctx.roundRect(-labelRect.w / 2, -labelRect.h / 2, labelRect.w, labelRect.h, 6);
         ctx.fill();
-        ctx.strokeStyle = 'rgba(245, 158, 11, 0.6)';
+        ctx.strokeStyle = 'rgba(245, 158, 11, 0.65)';
         ctx.lineWidth = 1;
         ctx.stroke();
 
         ctx.fillStyle = '#FDE68A';
-        ctx.fillText(labelText, boxX + 7, boxY + 14.5);
-      } else {
-        ctx.fillStyle = '#64748B';
-        ctx.beginPath();
-        ctx.arc(px, py, 5.5, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.strokeStyle = '#0B0F17';
-        ctx.lineWidth = 2;
-        ctx.stroke();
-
-        ctx.fillStyle = '#94A3B8';
-        ctx.font = '500 10.5px "Plus Jakarta Sans", system-ui, sans-serif';
-        const first = peer.fullName.split(' ')[0];
-        const w = ctx.measureText(first).width;
-        ctx.fillText(first, px - w / 2, py - 10);
-      }
-    });
-
-    // Live Connected Users (Supabase/InsForge Realtime Presence)
-    liveUsers.forEach((lu) => {
-      const lx = wx(lu.x);
-      const ly = wy(lu.y);
-      const isTarget = targetLiveUserId === lu.id;
-
-      // Soft colored aura
-      ctx.fillStyle = `${lu.color}2A`;
-      ctx.beginPath();
-      ctx.arc(lx, ly, isTarget ? 15 + pulseAnim * 12 : 13, 0, Math.PI * 2);
-      ctx.fill();
-
-      if (isTarget) {
-        ctx.strokeStyle = lu.color;
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-        ctx.arc(lx, ly, 10 + pulseAnim * 20, 0, Math.PI * 2);
-        ctx.stroke();
-      }
-
-      const luAvatar = lu.avatarUrl ? avatarImagesRef.current.get(lu.avatarUrl) : undefined;
-      if (luAvatar instanceof HTMLImageElement) {
-        const avatarR = 11.5;
-        ctx.save();
-        ctx.beginPath();
-        ctx.arc(lx, ly, avatarR, 0, Math.PI * 2);
-        ctx.clip();
-        ctx.drawImage(luAvatar, lx - avatarR, ly - avatarR, avatarR * 2, avatarR * 2);
+        ctx.fillText(labelText, -labelRect.w / 2 + 7, -labelRect.h / 2 + 14.5);
         ctx.restore();
-
-        ctx.strokeStyle = isTarget ? '#FFFFFF' : lu.color;
-        ctx.lineWidth = 2.5;
-        ctx.beginPath();
-        ctx.arc(lx, ly, avatarR, 0, Math.PI * 2);
-        ctx.stroke();
       } else {
-        // Crisp user pin
-        ctx.fillStyle = lu.color;
+        ctx.fillStyle = '#475569';
         ctx.beginPath();
-        ctx.arc(lx, ly, 7.5, 0, Math.PI * 2);
+        ctx.arc(px, py, 4.8, 0, Math.PI * 2);
         ctx.fill();
-        ctx.strokeStyle = '#FFFFFF';
-        ctx.lineWidth = 2.5;
+        ctx.strokeStyle = '#090A0F';
+        ctx.lineWidth = 1.8;
         ctx.stroke();
+
+        ctx.font = '500 10px "Plus Jakarta Sans", system-ui, sans-serif';
+        const shortName = getShortPersonLabel(peer.fullName);
+        const textW = ctx.measureText(shortName).width;
+        const peerRect = placeNonOverlappingLabel(
+          px,
+          py,
+          5,
+          textW + 4,
+          14,
+          viewW,
+          viewH,
+          occupiedLabels,
+          ['below', 'above', 'right', 'left']
+        );
+        ctx.save();
+        ctx.translate(peerRect.x + 2, peerRect.y + 11);
+        ctx.scale(1, labelYScale);
+        ctx.fillStyle = 'rgba(148, 163, 184, 0.62)';
+        ctx.fillText(shortName, 0, 0);
+        ctx.restore();
       }
-
-      // Name tag pill above marker
-      const tagText = lu.name;
-      ctx.font = '600 11px "Plus Jakarta Sans", system-ui, sans-serif';
-      const tagWidth = ctx.measureText(tagText).width;
-      const pillW = tagWidth + 16;
-      const pillH = 22;
-      const pillX = Math.max(8, Math.min(viewW - pillW - 8, lx - pillW / 2));
-      const pillY = Math.max(8, ly - (luAvatar instanceof HTMLImageElement ? 38 : 34));
-
-      ctx.fillStyle = 'rgba(17, 22, 34, 0.95)';
-      ctx.beginPath();
-      ctx.roundRect(pillX, pillY, pillW, pillH, 6);
-      ctx.fill();
-      ctx.strokeStyle = isTarget ? '#FFFFFF' : `${lu.color}B8`;
-      ctx.lineWidth = 1.25;
-      ctx.stroke();
-
-      ctx.fillStyle = '#F8FAFC';
-      ctx.fillText(tagText, pillX + 8, pillY + 14.5);
     });
 
-    // 6.5 Virtual BLE Beacons + Raw Jitter vs. 1D Kalman Trilateration Overlay
-    if (isSimulating || isTelemetryOpen) {
-      beacons.forEach((b) => {
-        const bxPos = wx(b.x);
-        const byPos = wy(b.y);
-        const dSize = Math.max(4.5, scale * 0.18);
-
-        ctx.fillStyle = '#0B0F17';
-        ctx.strokeStyle = 'rgba(56, 189, 248, 0.72)';
-        ctx.lineWidth = 1.5;
-        ctx.beginPath();
-        ctx.moveTo(bxPos, byPos - dSize);
-        ctx.lineTo(bxPos + dSize, byPos);
-        ctx.lineTo(bxPos, byPos + dSize);
-        ctx.lineTo(bxPos - dSize, byPos);
-        ctx.closePath();
-        ctx.fill();
-        ctx.stroke();
-
-        if (scale >= 12) {
-          ctx.fillStyle = 'rgba(125, 211, 252, 0.85)';
-          ctx.font = '600 9.5px "JetBrains Mono", monospace';
-          ctx.fillText(b.id, bxPos + dSize + 4, byPos + 3.5);
-        }
-      });
-    }
-
+    // 7.7 Raw Jitter vs. 1D Kalman Trilateration Comparison Overlay (Simulation)
     if (isSimulating && rawTrilatPose && kalmanTrilatPose) {
       const rxRaw = wx(rawTrilatPose.x);
       const ryRaw = wy(rawTrilatPose.y);
       const kxEst = wx(kalmanTrilatPose.x);
       const kyEst = wy(kalmanTrilatPose.y);
 
-      // Jitter vector from noisy raw RSSI solution to Kalman-smoothed estimate
       ctx.strokeStyle = 'rgba(251, 146, 60, 0.45)';
       ctx.lineWidth = 1.25;
       ctx.setLineDash([3, 3]);
@@ -2235,7 +2863,6 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
       ctx.stroke();
       ctx.setLineDash([]);
 
-      // Raw noisy BLE marker (amber cross/ring)
       ctx.strokeStyle = 'rgba(251, 146, 60, 0.9)';
       ctx.lineWidth = 1.6;
       ctx.beginPath();
@@ -2246,7 +2873,6 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
       ctx.lineTo(rxRaw, ryRaw + 6);
       ctx.stroke();
 
-      // Kalman-smoothed BLE trilateration ring
       ctx.strokeStyle = 'rgba(34, 211, 238, 0.85)';
       ctx.lineWidth = 1.6;
       ctx.setLineDash([4, 3]);
@@ -2256,95 +2882,27 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
       ctx.setLineDash([]);
     }
 
-    // 7. Current User Position Beacon & Heading Cone
-    const ux = wx(userPose.x);
-    const uy = wy(userPose.y);
-
-    ctx.fillStyle = 'rgba(59, 130, 246, 0.1)';
-    ctx.beginPath();
-    ctx.arc(ux, uy, userPose.accuracy * scale, 0, Math.PI * 2);
-    ctx.fill();
-
-    const headingRad = ((userPose.heading - 90) * Math.PI) / 180;
-    const coneRadius = Math.max(36, scale * 1.65);
-    const coneGrad = ctx.createRadialGradient(ux, uy, 4, ux, uy, coneRadius);
-    coneGrad.addColorStop(0, 'rgba(59, 130, 246, 0.42)');
-    coneGrad.addColorStop(1, 'rgba(59, 130, 246, 0.02)');
-    ctx.fillStyle = coneGrad;
-    ctx.beginPath();
-    ctx.moveTo(ux, uy);
-    ctx.arc(ux, uy, coneRadius, headingRad - 0.42, headingRad + 0.42);
-    ctx.closePath();
-    ctx.fill();
-
-    const isWallBlocked = Date.now() < wallHitUntilRef.current;
-
-    ctx.strokeStyle = isWallBlocked
-      ? 'rgba(244, 63, 94, 0.9)'
-      : `rgba(59, 130, 246, ${0.85 * (1 - pulseAnim)})`;
-    ctx.lineWidth = 2.5;
-    ctx.beginPath();
-    ctx.arc(ux, uy, 9 + pulseAnim * 20, 0, Math.PI * 2);
-    ctx.stroke();
-
-    const youAvatar = currentUser.avatarUrl
-      ? avatarImagesRef.current.get(currentUser.avatarUrl)
-      : undefined;
-
-    if (youAvatar instanceof HTMLImageElement) {
-      const avatarR = 12;
-      ctx.save();
-      ctx.beginPath();
-      ctx.arc(ux, uy, avatarR, 0, Math.PI * 2);
-      ctx.clip();
-      ctx.drawImage(youAvatar, ux - avatarR, uy - avatarR, avatarR * 2, avatarR * 2);
-      ctx.restore();
-
-      ctx.strokeStyle = isWallBlocked ? '#F43F5E' : '#3B82F6';
-      ctx.lineWidth = 3;
-      ctx.beginPath();
-      ctx.arc(ux, uy, avatarR, 0, Math.PI * 2);
-      ctx.stroke();
-
-      ctx.strokeStyle = '#FFFFFF';
-      ctx.lineWidth = 1.5;
-      ctx.beginPath();
-      ctx.arc(ux, uy, avatarR + 1.5, 0, Math.PI * 2);
-      ctx.stroke();
-    } else {
-      ctx.fillStyle = isWallBlocked ? '#F43F5E' : '#3B82F6';
-      ctx.beginPath();
-      ctx.arc(ux, uy, 8, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.strokeStyle = '#FFFFFF';
-      ctx.lineWidth = 2.5;
-      ctx.stroke();
-    }
-
-    // Distinct "You" Marker Tag so current user is immediately distinguishable from peers
-    const youText = presenceProfile ? `You · ${presenceProfile.name.split(' ')[0]}` : 'You';
-    ctx.font = '700 10.5px "Plus Jakarta Sans", system-ui, sans-serif';
-    const youTextW = ctx.measureText(youText).width;
-    const youBoxW = youTextW + 14;
-    const youBoxH = 20;
-    const youBoxX = Math.max(8, Math.min(viewW - youBoxW - 8, ux - youBoxW / 2));
-    const youBoxY = Math.min(viewH - youBoxH - 8, uy + (youAvatar instanceof HTMLImageElement ? 18 : 14));
-
-    ctx.fillStyle = 'rgba(30, 58, 138, 0.94)';
-    ctx.beginPath();
-    ctx.roundRect(youBoxX, youBoxY, youBoxW, youBoxH, 6);
-    ctx.fill();
-    ctx.strokeStyle = 'rgba(147, 197, 253, 0.85)';
-    ctx.lineWidth = 1;
-    ctx.stroke();
-    ctx.fillStyle = '#FFFFFF';
-    ctx.fillText(youText, youBoxX + 7, youBoxY + 13.5);
-
-    // 8. Architectural 5m Scale Bar (bottom-left)
+    // 8. Architectural 5m Scale Bar + North Arrow (bottom-left)
     const scaleX = 16;
     const scaleY = viewH - 16;
     const scaleLen = 5 * scale;
     if (scaleLen <= viewW * 0.45) {
+      const northX = scaleX + 7;
+      const northY = scaleY - 22;
+      ctx.strokeStyle = 'rgba(148, 163, 184, 0.45)';
+      ctx.fillStyle = 'rgba(56, 189, 248, 0.85)';
+      ctx.lineWidth = 1.3;
+      ctx.beginPath();
+      ctx.moveTo(northX, northY - 7);
+      ctx.lineTo(northX - 4, northY + 2);
+      ctx.lineTo(northX, northY);
+      ctx.lineTo(northX + 4, northY + 2);
+      ctx.closePath();
+      ctx.fill();
+      ctx.fillStyle = '#94A3B8';
+      ctx.font = '600 9.5px "JetBrains Mono", monospace';
+      ctx.fillText('N', northX + 8, northY + 1);
+
       ctx.strokeStyle = 'rgba(148, 163, 184, 0.55)';
       ctx.lineWidth = 1.5;
       ctx.beginPath();
@@ -2362,6 +2920,7 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
   }, [
     viewportSize,
     camera,
+    is25DMode,
     userPose,
     activeRoute,
     displayedDemoBots,
@@ -2381,14 +2940,14 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
     kalmanTrilatPose,
   ]);
 
-  // Select live user / peer / room OR set laptop coordinate from canvas click coordinates
+  // Select live user / peer / room OR set laptop coordinate from canvas click coordinates (2D & 2.5D safe)
   const selectMapTargetAtClientPoint = useCallback(
     (clientX: number, clientY: number) => {
       const canvas = canvasRef.current;
       if (!canvas) return;
       const rect = canvas.getBoundingClientRect();
-      const screenX = clientX - rect.left;
-      const screenY = clientY - rect.top;
+      const screenX = ((clientX - rect.left) / Math.max(1, rect.width)) * viewportSize.width;
+      const screenY = ((clientY - rect.top) / Math.max(1, rect.height)) * viewportSize.height;
       const meterX = (screenX - camera.panX) / camera.scale;
       const meterY = (screenY - camera.panY) / camera.scale;
 
@@ -2440,11 +2999,23 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
         setIsSpotPickerActive(false);
       }
     },
-    [camera, isSpotPickerActive, liveUsers, showDemoBots, peers, nodes, deviceType, isSimulating]
+    [
+      camera,
+      viewportSize.width,
+      viewportSize.height,
+      isSpotPickerActive,
+      liveUsers,
+      showDemoBots,
+      peers,
+      nodes,
+      deviceType,
+      isSimulating,
+    ]
   );
 
   // Mouse pan & click handlers
   const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    cancelCameraAnimation();
     pointerStateRef.current.isDragging = true;
     pointerStateRef.current.movedPx = 0;
     pointerStateRef.current.startX = e.clientX;
@@ -2459,11 +3030,18 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
     const dx = e.clientX - st.startX;
     const dy = e.clientY - st.startY;
     st.movedPx = Math.max(st.movedPx, Math.hypot(dx, dy));
-    setCamera((prev) => ({
-      ...prev,
-      panX: st.origPanX + dx,
-      panY: st.origPanY + dy,
-    }));
+    if (!isManualCameraRef.current) return;
+    setCamera((prev) =>
+      clampCameraPan(
+        {
+          ...prev,
+          panX: st.origPanX + dx,
+          panY: st.origPanY + dy,
+        },
+        viewportSize.width,
+        viewportSize.height
+      )
+    );
   };
 
   const handleMouseUp = (e: React.MouseEvent<HTMLCanvasElement>) => {
@@ -2483,8 +3061,9 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
     zoomBy(factor, fx, fy);
   };
 
-  // Touch single-finger pan + two-finger pinch zoom handlers
+  // Touch single-finger pan (when zoomed in) + two-finger pinch zoom handlers
   const handleTouchStart = (e: React.TouchEvent<HTMLCanvasElement>) => {
+    cancelCameraAnimation();
     const st = pointerStateRef.current;
     if (e.touches.length === 1) {
       const t = e.touches[0];
@@ -2516,23 +3095,43 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
       const dx = t.clientX - st.startX;
       const dy = t.clientY - st.startY;
       st.movedPx = Math.max(st.movedPx, Math.hypot(dx, dy));
-      setCamera((prev) => ({
-        ...prev,
-        panX: st.origPanX + dx,
-        panY: st.origPanY + dy,
-      }));
+      if (!isManualCameraRef.current) return;
+      setCamera((prev) =>
+        clampCameraPan(
+          {
+            ...prev,
+            panX: st.origPanX + dx,
+            panY: st.origPanY + dy,
+          },
+          viewportSize.width,
+          viewportSize.height
+        )
+      );
     } else if (e.touches.length === 2 && st.pinchDist && st.pinchDist > 0) {
       const [t1, t2] = [e.touches[0], e.touches[1]];
+      const fit = computeFitCamera(viewportSize.width, viewportSize.height);
       const nextDist = Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
       const ratio = nextDist / st.pinchDist;
-      const nextScale = Math.max(10, Math.min(72, st.origScale * ratio));
+      const nextScale = Math.max(fit.scale, Math.min(72, st.origScale * ratio));
+      if (nextScale <= fit.scale * 1.03) {
+        isManualCameraRef.current = false;
+        setCamera(fit);
+        return;
+      }
+      isManualCameraRef.current = true;
       const worldX = (st.pinchMidX - st.origPanX) / st.origScale;
       const worldY = (st.pinchMidY - st.origPanY) / st.origScale;
-      setCamera({
-        scale: nextScale,
-        panX: st.pinchMidX - worldX * nextScale,
-        panY: st.pinchMidY - worldY * nextScale,
-      });
+      setCamera(
+        clampCameraPan(
+          {
+            scale: nextScale,
+            panX: st.pinchMidX - worldX * nextScale,
+            panY: st.pinchMidY - worldY * nextScale,
+          },
+          viewportSize.width,
+          viewportSize.height
+        )
+      );
     }
   };
 
@@ -2556,7 +3155,9 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
     : bleState === 'connected'
       ? 'Hardware BLE'
       : 'PDR Sensors';
-  const routeEtaSeconds = Math.max(1, Math.round(remainingDistanceMeters / 1.1));
+  const routeEtaSeconds = Math.max(1, Math.round(remainingDistanceMeters / 1.15));
+  const estimatedRouteSteps =
+    remainingDistanceMeters <= 0.4 ? 0 : Math.max(1, Math.round(remainingDistanceMeters / 0.72));
   const showBleAutoSuggestion =
     !isSimulating &&
     bleState !== 'connected' &&
@@ -2668,13 +3269,14 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
                   <button
                     key={lu.id}
                     type="button"
-                    onClick={() => {
+                      onClick={() => {
                       if (isTarget) {
                         setTargetLiveUserId(null);
                       } else {
                         setTargetLiveUserId(lu.id);
                         setTargetPeerId(null);
                         setTargetRoomId(null);
+                        focusMapOnPoint(lu.x, lu.y, lu.color);
                       }
                       if (isMobileSheet) setIsMobileSheetOpen(false);
                     }}
@@ -2741,6 +3343,7 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
                         setTargetPeerId(peer.id);
                         setTargetLiveUserId(null);
                         setTargetRoomId(null);
+                        focusMapOnPoint(peer.x, peer.y, '#F59E0B');
                       }
                       if (isMobileSheet) setIsMobileSheetOpen(false);
                     }}
@@ -2762,8 +3365,11 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
                         {peer.fullName[0]}
                       </div>
                       <div className="min-w-0">
-                        <div className="font-semibold text-white text-sm truncate">
-                          {peer.fullName}
+                        <div className="font-semibold text-white text-sm truncate flex items-center gap-1.5">
+                          <span className="truncate">{peer.fullName}</span>
+                          <span className="text-[10px] font-mono uppercase text-slate-500 shrink-0">
+                            Demo
+                          </span>
                         </div>
                         <div className="text-xs text-slate-400 truncate">
                           {peer.department} <span aria-hidden="true">·</span> {peer.role}
@@ -2808,6 +3414,7 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
                     setTargetRoomId(room.id);
                     setTargetPeerId(null);
                     setTargetLiveUserId(null);
+                    focusMapOnPoint(room.x, room.y, '#38BDF8');
                   }
                   if (isMobileSheet) setIsMobileSheetOpen(false);
                 }}
@@ -2846,7 +3453,7 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
   );
 
   return (
-    <div className="h-[100dvh] w-full bg-[#0B0F17] text-slate-100 flex flex-col lg:flex-row font-sans select-none overflow-hidden overflow-x-hidden">
+    <div className="h-[100dvh] w-full bg-[#090A0F] text-slate-100 flex flex-col lg:flex-row font-sans select-none overflow-hidden overflow-x-hidden">
       {/* DESKTOP LEFT WORKSPACE SIDEBAR (lg+) */}
       <aside className="hidden lg:flex lg:w-[340px] lg:shrink-0 flex-col bg-[#111622] border-r border-white/[0.08] p-5 z-20">
         {/* Brand Header */}
@@ -2860,7 +3467,7 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
             <h1 className="text-sm font-bold text-white tracking-tight truncate">IndoorNav</h1>
             <p className="text-xs text-slate-400 font-mono tabular-nums">
               Floor 1 <span aria-hidden="true">·</span> {totalLiveOnlineCount} live{' '}
-              <span aria-hidden="true">·</span> {onlinePeersCount} peers
+              <span aria-hidden="true">·</span> {displayedDemoBots.length} demo
             </p>
           </div>
         </div>
@@ -2908,7 +3515,8 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
           <div className="min-w-0">
             <h1 className="text-sm font-bold text-white tracking-tight truncate">IndoorNav</h1>
             <p className="text-[11px] text-slate-400 leading-none mt-0.5 truncate font-mono tabular-nums">
-              F1 <span aria-hidden="true">·</span> {positioningMode === 'Simulation' ? 'Sim' : `${onlinePeersCount} peers`}
+              F1 <span aria-hidden="true">·</span>{' '}
+              {positioningMode === 'Simulation' ? 'Sim' : `${totalLiveOnlineCount} live`}
             </p>
           </div>
         </div>
@@ -2962,24 +3570,30 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
       {/* FULL-BLEED INTERACTIVE SPATIAL MAP VIEWPORT */}
       <main
         ref={mapContainerRef}
-        className="flex-1 relative bg-[#0B0F17] overflow-hidden min-h-0"
+        className="flex-1 relative spatial-grid-bg overflow-hidden min-h-0"
       >
-        <canvas
-          ref={canvasRef}
-          onMouseDown={handleMouseDown}
-          onMouseMove={handleMouseMove}
-          onMouseUp={handleMouseUp}
-          onMouseLeave={() => {
-            pointerStateRef.current.isDragging = false;
-          }}
-          onWheel={handleWheel}
-          onTouchStart={handleTouchStart}
-          onTouchMove={handleTouchMove}
-          onTouchEnd={handleTouchEnd}
-          className="block w-full h-full cursor-grab active:cursor-grabbing touch-none"
-        />
+        <div className="spatial-vignette pointer-events-none absolute inset-0 z-0" aria-hidden="true" />
 
-        {/* Mobile Floating Sensor & Online Pill Controls (Top of Map) */}
+        <div className="spatial-stage-perspective w-full h-full relative z-10">
+          <div className={`w-full h-full spatial-plate ${is25DMode ? 'spatial-plate--tilt' : ''}`}>
+            <canvas
+              ref={canvasRef}
+              onMouseDown={handleMouseDown}
+              onMouseMove={handleMouseMove}
+              onMouseUp={handleMouseUp}
+              onMouseLeave={() => {
+                pointerStateRef.current.isDragging = false;
+              }}
+              onWheel={handleWheel}
+              onTouchStart={handleTouchStart}
+              onTouchMove={handleTouchMove}
+              onTouchEnd={handleTouchEnd}
+              className="block w-full h-full cursor-grab active:cursor-grabbing touch-none"
+            />
+          </div>
+        </div>
+
+        {/* Mobile Floating Sensor, 2.5D & Online Pill Controls (Top of Map) */}
         <div className="lg:hidden flex items-start justify-between gap-2 absolute top-3 inset-x-3 z-20 pointer-events-none">
           <div className="flex flex-wrap items-center gap-1.5 pointer-events-auto">
             <button
@@ -2994,6 +3608,21 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
             >
               <Smartphone className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
               <span>{motionSensorsActive ? 'Motion Active' : 'Sensors'}</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setIs25DMode((prev) => !prev)}
+              aria-pressed={is25DMode}
+              aria-label="Toggle 2.5D perspective"
+              className={`min-h-[44px] px-2.5 rounded-xl text-xs font-semibold border backdrop-blur-md transition-colors flex items-center gap-1 whitespace-nowrap focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 ${
+                is25DMode
+                  ? 'bg-sky-400 text-slate-950 border-sky-300'
+                  : 'bg-[#111622]/92 text-slate-200 border-white/[0.1]'
+              }`}
+            >
+              <Layers className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+              <span>{is25DMode ? '2.5D' : '2D'}</span>
             </button>
 
             {motionSensorsActive && (
@@ -3110,6 +3739,39 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
           </div>
 
           <div className="flex items-center gap-2 pointer-events-auto">
+            {/* Sleek 2D Plan / 2.5D Tilt Segmented Control */}
+            <div
+              role="group"
+              aria-label="Floor plan perspective"
+              className="flex items-center p-1 rounded-xl bg-[#111622]/92 border border-white/[0.12] backdrop-blur-md"
+            >
+              <button
+                type="button"
+                onClick={() => setIs25DMode(false)}
+                aria-pressed={!is25DMode}
+                className={`min-h-[36px] px-2.5 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap ${
+                  !is25DMode
+                    ? 'bg-sky-400 text-slate-950'
+                    : 'text-slate-300 hover:text-white'
+                }`}
+              >
+                2D Plan
+              </button>
+              <button
+                type="button"
+                onClick={() => setIs25DMode(true)}
+                aria-pressed={is25DMode}
+                className={`min-h-[36px] px-2.5 rounded-lg text-xs font-semibold transition-colors flex items-center gap-1 whitespace-nowrap ${
+                  is25DMode
+                    ? 'bg-sky-400 text-slate-950'
+                    : 'text-slate-300 hover:text-white'
+                }`}
+              >
+                <Layers className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                <span>2.5D Tilt</span>
+              </button>
+            </div>
+
             <button
               type="button"
               onClick={() => setIsOnlineDropdownOpen((prev) => !prev)}
@@ -3248,9 +3910,14 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
                         key={lu.id}
                         type="button"
                         onClick={() => {
-                          setTargetLiveUserId(isRouting ? null : lu.id);
-                          setTargetPeerId(null);
-                          setTargetRoomId(null);
+                          if (isRouting) {
+                            setTargetLiveUserId(null);
+                          } else {
+                            setTargetLiveUserId(lu.id);
+                            setTargetPeerId(null);
+                            setTargetRoomId(null);
+                            focusMapOnPoint(lu.x, lu.y, lu.color);
+                          }
                           setIsOnlineDropdownOpen(false);
                         }}
                         className={`w-full min-h-[48px] p-2.5 rounded-xl border text-left flex items-center justify-between gap-2 transition-colors ${
@@ -3442,7 +4109,7 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
                     <span>
                       {hasArrived
                         ? 'At target location'
-                        : `~${routeEtaSeconds}s walk · ${userPose.stepCount} steps`}
+                        : `~${routeEtaSeconds}s walk · ~${estimatedRouteSteps} steps`}
                     </span>
                   </div>
                 </div>
@@ -3549,7 +4216,7 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
 
         {/* Desktop Subtle Telemetry Strip (Hidden when auto-suggestion banner is visible) */}
         {!showBleAutoSuggestion && (
-          <div className="hidden lg:flex items-center gap-2.5 absolute bottom-3.5 left-1/2 -translate-x-1/2 px-3 py-1.5 rounded-xl bg-[#111622]/85 border border-white/[0.08] backdrop-blur-md text-[11px] text-slate-400 pointer-events-none">
+          <div className="hidden lg:flex items-center gap-2.5 absolute bottom-3.5 left-1/2 -translate-x-1/2 px-3 py-1.5 rounded-xl bg-[#111622]/85 border border-white/[0.08] backdrop-blur-md text-[11px] text-slate-400 pointer-events-none z-20">
             <span className="font-mono tabular-nums text-slate-200">
               HDG {String(userPose.heading).padStart(3, '0')}°
             </span>
@@ -3557,7 +4224,9 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
             <span className="font-mono tabular-nums">{userPose.stepCount} steps</span>
             <span aria-hidden="true">·</span>
             <span className="font-mono tabular-nums">
-              {isSimulating ? `Kalman ±${kalmanError.toFixed(1)}m` : `${onlinePeersCount} peers`}
+              {isSimulating
+                ? `Kalman ±${kalmanError.toFixed(1)}m`
+                : `${totalLiveOnlineCount} live · ${displayedDemoBots.length} demo`}
             </span>
           </div>
         )}
@@ -3702,7 +4371,7 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
                     {activeTarget
                       ? hasArrived
                         ? 'Arrived'
-                        : `${remainingDistanceMeters.toFixed(1)}m · ~${routeEtaSeconds}s`
+                        : `${remainingDistanceMeters.toFixed(1)}m · ~${routeEtaSeconds}s · ~${estimatedRouteSteps} steps`
                       : 'Idle'}
                   </span>
                 </div>
@@ -3831,7 +4500,7 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
                       <span className="text-sky-400 font-semibold">
                         {remainingDistanceMeters.toFixed(1)} m
                       </span>{' '}
-                      · ~{routeEtaSeconds}s · {userPose.stepCount} steps
+                      · ~{routeEtaSeconds}s · ~{estimatedRouteSteps} steps
                     </>
                   )}
                 </div>
@@ -3872,7 +4541,7 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
               <span>Find People &amp; Rooms</span>
             </span>
             <span className="text-xs font-mono tabular-nums font-bold">
-              {onlinePeersCount} online
+              {totalLiveOnlineCount} live
             </span>
           </button>
         )}
@@ -3899,8 +4568,9 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
             <div className="flex items-center justify-between pb-3 border-b border-white/[0.08]">
               <div>
                 <h2 className="text-base font-bold text-white leading-tight">Floor 1 Directory</h2>
-                <p className="text-xs text-slate-400 mt-0.5">
-                  {onlinePeersCount} active people <span aria-hidden="true">·</span>{' '}
+                <p className="text-xs text-slate-400 mt-0.5 font-mono tabular-nums">
+                  {totalLiveOnlineCount} live <span aria-hidden="true">·</span>{' '}
+                  {displayedDemoBots.length} demo <span aria-hidden="true">·</span>{' '}
                   {roomDestinations.length} rooms
                 </p>
               </div>
