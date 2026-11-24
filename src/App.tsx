@@ -25,7 +25,7 @@ class AppErrorBoundary extends React.Component<
   render() {
     if (this.state.hasError) {
       return (
-        <div className="min-h-[100dvh] w-full bg-[#0B0F17] text-slate-100 flex items-center justify-center p-6 overflow-x-hidden">
+        <div className="min-h-[100dvh] w-full bg-[#090A0F] text-slate-100 flex items-center justify-center p-6 overflow-x-hidden">
           <div className="max-w-md w-full bg-[#111622] border border-slate-800 rounded-2xl p-6 text-center space-y-4 shadow-2xl">
             <h1 className="text-lg font-bold text-white">IndoorNav</h1>
             <p className="text-sm text-slate-400">
@@ -101,7 +101,11 @@ export default function App() {
   return (
     <AppErrorBoundary>
       <MotionConfig reducedMotion="user">
-        <div className="relative min-h-[100dvh] w-full bg-[#0B0F17] select-none overflow-x-hidden">
+        <div
+          className={`relative min-h-[100svh] w-full bg-[#090A0F] overflow-x-clip ${
+            screen === 'dashboard' ? 'select-none' : 'touch-pan-y'
+          }`}
+        >
           <AnimatePresence mode="wait">
             {screen === 'splash' && (
               <motion.div

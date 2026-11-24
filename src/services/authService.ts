@@ -1,5 +1,5 @@
 import { InsForgeError, type UserSchema } from '@insforge/sdk';
-import { insforge } from '../lib/insforge';
+import { hasInsForgeAnonKey, insforge } from '../lib/insforge';
 
 export type OAuthProvider = 'google' | 'github';
 
@@ -47,6 +47,10 @@ export interface PublicAuthConfig {
   verifyEmailMethod: 'code' | 'link';
   resetPasswordMethod: 'code' | 'link';
   passwordMinLength: number;
+  requireNumber: boolean;
+  requireLowercase: boolean;
+  requireUppercase: boolean;
+  requireSpecialChar: boolean;
   disableSignup: boolean;
 }
 
@@ -57,6 +61,7 @@ export type AuthErrorCode =
   | 'invalid-code'
   | 'rate-limited'
   | 'oauth-iframe-blocked'
+  | 'config-error'
   | 'network-error'
   | 'validation-error';
 
@@ -80,6 +85,15 @@ function ensureOnline(): void {
     throw new AuthServiceError(
       'network-error',
       'You appear to be offline. Please check your internet connection and try again.'
+    );
+  }
+}
+
+function ensureAnonKeyConfigured(): void {
+  if (!hasInsForgeAnonKey) {
+    throw new AuthServiceError(
+      'config-error',
+      'Email & password authentication is missing VITE_INSFORGE_ANON_KEY in your environment variables. Add VITE_INSFORGE_ANON_KEY in your deployment settings and redeploy, or continue with Google/GitHub.'
     );
   }
 }
@@ -240,7 +254,21 @@ function mapInsForgeError(err: unknown, fallbackMessage: string): AuthServiceErr
     }
 
     if (
+      errorCode === 'AUTH_INVALID_CREDENTIALS' ||
+      lower.includes('no token provided') ||
+      lower.includes('invalid token') ||
+      lower.includes('anon key') ||
+      lower.includes('api key')
+    ) {
+      return new AuthServiceError(
+        'config-error',
+        'Email & password authentication requires VITE_INSFORGE_ANON_KEY in your deployment environment variables. Add it and redeploy, or continue with Google/GitHub.'
+      );
+    }
+
+    if (
       err.statusCode === 401 ||
+      errorCode === 'AUTH_UNAUTHORIZED' ||
       errorCode === 'INVALID_CREDENTIALS' ||
       lower.includes('invalid credentials') ||
       lower.includes('invalid email or password') ||
@@ -248,7 +276,7 @@ function mapInsForgeError(err: unknown, fallbackMessage: string): AuthServiceErr
     ) {
       return new AuthServiceError(
         'wrong-credentials',
-        'Incorrect email or password. Please check your credentials and try again.'
+        'Incorrect email or password. If you have not created a password account yet, switch to Sign Up—or if you previously used Google/GitHub, sign in with that provider or reset your password.'
       );
     }
 
@@ -279,8 +307,14 @@ const DEFAULT_PUBLIC_CONFIG: PublicAuthConfig = {
   verifyEmailMethod: 'code',
   resetPasswordMethod: 'code',
   passwordMinLength: 6,
+  requireNumber: false,
+  requireLowercase: false,
+  requireUppercase: false,
+  requireSpecialChar: false,
   disableSignup: false,
 };
+
+let cachedPublicConfig: PublicAuthConfig = DEFAULT_PUBLIC_CONFIG;
 
 export const authService = {
   async getAuthConfig(): Promise<PublicAuthConfig> {
@@ -295,7 +329,7 @@ export const authService = {
           )
         : DEFAULT_PUBLIC_CONFIG.oAuthProviders;
 
-      return {
+      cachedPublicConfig = {
         oAuthProviders: providers,
         requireEmailVerification: Boolean(data.requireEmailVerification),
         verifyEmailMethod: data.verifyEmailMethod === 'link' ? 'link' : 'code',
@@ -304,8 +338,13 @@ export const authService = {
           typeof data.passwordMinLength === 'number' && data.passwordMinLength > 0
             ? data.passwordMinLength
             : 6,
+        requireNumber: Boolean(data.requireNumber),
+        requireLowercase: Boolean(data.requireLowercase),
+        requireUppercase: Boolean(data.requireUppercase),
+        requireSpecialChar: Boolean(data.requireSpecialChar),
         disableSignup: Boolean(data.disableSignup),
       };
+      return cachedPublicConfig;
     } catch {
       return DEFAULT_PUBLIC_CONFIG;
     }
@@ -313,15 +352,19 @@ export const authService = {
 
   async signUp({ fullName, email, password }: SignUpInput): Promise<SignUpResult> {
     ensureOnline();
+    ensureAnonKeyConfigured();
 
     const cleanEmail = normalizeEmail(email);
     const cleanName = fullName.trim();
+    const shouldIncludeRedirect = cachedPublicConfig.verifyEmailMethod === 'link';
 
     const { data, error } = await insforge.auth.signUp({
       email: cleanEmail,
       password,
       name: cleanName,
-      redirectTo: typeof window !== 'undefined' ? window.location.origin : undefined,
+      ...(shouldIncludeRedirect && typeof window !== 'undefined'
+        ? { redirectTo: window.location.origin }
+        : {}),
     });
 
     if (error) {
@@ -332,7 +375,7 @@ export const authService = {
       return {
         status: 'verification-required',
         email: data.user?.email ?? cleanEmail,
-        method: 'code',
+        method: cachedPublicConfig.verifyEmailMethod,
       };
     }
 
@@ -352,6 +395,7 @@ export const authService = {
 
   async verifyEmail({ email, code }: VerifyEmailInput): Promise<AuthUser> {
     ensureOnline();
+    ensureAnonKeyConfigured();
 
     const cleanEmail = normalizeEmail(email);
     const cleanCode = code.trim();
@@ -381,11 +425,15 @@ export const authService = {
 
   async resendVerificationCode(email: string): Promise<void> {
     ensureOnline();
+    ensureAnonKeyConfigured();
 
     const cleanEmail = normalizeEmail(email);
+    const shouldIncludeRedirect = cachedPublicConfig.verifyEmailMethod === 'link';
     const { error } = await insforge.auth.resendVerificationEmail({
       email: cleanEmail,
-      redirectTo: typeof window !== 'undefined' ? window.location.origin : undefined,
+      ...(shouldIncludeRedirect && typeof window !== 'undefined'
+        ? { redirectTo: window.location.origin }
+        : {}),
     });
 
     if (error) {
@@ -398,6 +446,7 @@ export const authService = {
 
   async signIn({ email, password, rememberMe = true }: SignInInput): Promise<AuthUser> {
     ensureOnline();
+    ensureAnonKeyConfigured();
 
     const cleanEmail = normalizeEmail(email);
     const { data, error } = await insforge.auth.signInWithPassword({
@@ -451,15 +500,19 @@ export const authService = {
 
   async requestPasswordReset(email: string): Promise<void> {
     ensureOnline();
+    ensureAnonKeyConfigured();
 
     const cleanEmail = normalizeEmail(email);
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
       throw new AuthServiceError('validation-error', 'Please enter a valid email address.');
     }
 
+    const shouldIncludeRedirect = cachedPublicConfig.resetPasswordMethod === 'link';
     const { error } = await insforge.auth.sendResetPasswordEmail({
       email: cleanEmail,
-      redirectTo: typeof window !== 'undefined' ? window.location.origin : undefined,
+      ...(shouldIncludeRedirect && typeof window !== 'undefined'
+        ? { redirectTo: window.location.origin }
+        : {}),
     });
 
     if (error) {
@@ -476,6 +529,7 @@ export const authService = {
     newPassword,
   }: ConfirmPasswordResetInput): Promise<void> {
     ensureOnline();
+    ensureAnonKeyConfigured();
 
     const cleanEmail = normalizeEmail(email);
     const cleanCode = code.trim();

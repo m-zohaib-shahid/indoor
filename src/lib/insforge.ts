@@ -9,6 +9,8 @@ const anonKey =
   (typeof import.meta !== 'undefined' && import.meta.env?.VITE_INSFORGE_ANON_KEY) ||
   undefined;
 
+export const hasInsForgeAnonKey = Boolean(anonKey);
+
 // Capture any OAuth callback error before createClient() cleans query params from window.location.search
 export const initialOAuthCallbackError: string | null = (() => {
   if (typeof window === 'undefined') return null;

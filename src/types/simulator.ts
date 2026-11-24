@@ -53,6 +53,7 @@ export interface BuildingPeer {
   floor: number;
   isOnline: boolean;
   avatarColor: string;
+  avatarUrl?: string;
   lastUpdated: string;
 }
 

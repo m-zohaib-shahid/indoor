@@ -99,6 +99,10 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
     verifyEmailMethod: 'code',
     resetPasswordMethod: 'code',
     passwordMinLength: 6,
+    requireNumber: false,
+    requireLowercase: false,
+    requireUppercase: false,
+    requireSpecialChar: false,
     disableSignup: false,
   });
 
@@ -190,10 +194,40 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
     }
   };
 
+  const getPasswordPolicyError = (value: string): string | undefined => {
+    const minLen = Math.max(6, authConfig.passwordMinLength);
+    if (value.length < minLen) {
+      return `Password must be at least ${minLen} characters.`;
+    }
+    if (authConfig.requireNumber && !/\d/.test(value)) {
+      return 'Password must include at least 1 number.';
+    }
+    if (authConfig.requireLowercase && !/[a-z]/.test(value)) {
+      return 'Password must include at least 1 lowercase letter.';
+    }
+    if (authConfig.requireUppercase && !/[A-Z]/.test(value)) {
+      return 'Password must include at least 1 uppercase letter.';
+    }
+    if (authConfig.requireSpecialChar && !/[^A-Za-z0-9]/.test(value)) {
+      return 'Password must include at least 1 special character.';
+    }
+    return undefined;
+  };
+
+  const passwordRequirementHint = (() => {
+    const minLen = Math.max(6, authConfig.passwordMinLength);
+    const extras: string[] = [];
+    if (authConfig.requireNumber) extras.push('a number');
+    if (authConfig.requireUppercase) extras.push('an uppercase letter');
+    if (authConfig.requireSpecialChar) extras.push('a special character');
+    return extras.length > 0
+      ? `At least ${minLen} characters (${extras.join(', ')})`
+      : `At least ${minLen} characters`;
+  })();
+
   const validate = (): FieldErrors => {
     const errors: FieldErrors = {};
     const trimmedEmail = email.trim();
-    const minLen = Math.max(8, authConfig.passwordMinLength);
 
     if (mode === 'signup' && fullName.trim().length < 2) {
       errors.fullName = 'Please enter your full name.';
@@ -207,8 +241,9 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
 
     if (!password) {
       errors.password = 'Please enter your password.';
-    } else if (mode === 'signup' && (password.length < minLen || !/\d/.test(password))) {
-      errors.password = `Password must be at least ${minLen} characters and include at least 1 number.`;
+    } else if (mode === 'signup') {
+      const policyErr = getPasswordPolicyError(password);
+      if (policyErr) errors.password = policyErr;
     }
 
     if (mode === 'signup') {
@@ -406,14 +441,14 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
     setResetError(null);
 
     const trimmedCode = resetCode.replace(/\s+/g, '');
-    const minLen = Math.max(8, authConfig.passwordMinLength);
 
     if (!/^\d{6}$/.test(trimmedCode)) {
       setResetError('Please enter the 6-digit reset code sent to your email.');
       return;
     }
-    if (resetNewPassword.length < minLen || !/\d/.test(resetNewPassword)) {
-      setResetError(`New password must be at least ${minLen} characters and include 1 number.`);
+    const resetPolicyErr = getPasswordPolicyError(resetNewPassword);
+    if (resetPolicyErr) {
+      setResetError(resetPolicyErr);
       return;
     }
     if (resetNewPassword !== resetConfirmPassword) {
@@ -458,27 +493,37 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
   const showOAuthSection = hasGoogle || hasGitHub;
 
   return (
-    <div className="min-h-[100dvh] w-full bg-[#0B0F17] text-slate-100 flex items-center justify-center px-4 py-8 sm:px-6 lg:px-10 relative overflow-x-hidden">
-      {/* Subtle Architectural Backdrop */}
+    <div className="min-h-[100svh] w-full bg-[#0B0F17] text-slate-100 flex items-start lg:items-center justify-center px-4 py-6 sm:py-8 sm:px-6 lg:px-10 relative overflow-x-clip touch-pan-y">
+      {/* Lightweight Static Architectural Backdrop (non-fixed, zero GPU blur-filter overhead on mobile scroll) */}
       <div
         aria-hidden="true"
-        className="pointer-events-none fixed inset-0 opacity-[0.1]"
-        style={{
-          backgroundImage:
-            'radial-gradient(circle at 1px 1px, rgba(148, 163, 184, 0.35) 1px, transparent 0)',
-          backgroundSize: '28px 28px',
-        }}
-      />
-      <div
-        aria-hidden="true"
-        className="pointer-events-none fixed -top-40 -left-40 w-[30rem] h-[30rem] rounded-full bg-cyan-500/8 blur-3xl"
-      />
-      <div
-        aria-hidden="true"
-        className="pointer-events-none fixed -bottom-40 -right-40 w-[30rem] h-[30rem] rounded-full bg-blue-600/8 blur-3xl"
-      />
+        className="pointer-events-none absolute inset-0 overflow-hidden"
+      >
+        <div
+          className="absolute inset-0 opacity-[0.1]"
+          style={{
+            backgroundImage:
+              'radial-gradient(circle at 1px 1px, rgba(148, 163, 184, 0.35) 1px, transparent 0)',
+            backgroundSize: '28px 28px',
+          }}
+        />
+        <div
+          className="hidden sm:block absolute -top-40 -left-40 w-[30rem] h-[30rem] rounded-full"
+          style={{
+            background:
+              'radial-gradient(circle, rgba(6, 182, 212, 0.12) 0%, rgba(6, 182, 212, 0) 70%)',
+          }}
+        />
+        <div
+          className="hidden sm:block absolute -bottom-40 -right-40 w-[30rem] h-[30rem] rounded-full"
+          style={{
+            background:
+              'radial-gradient(circle, rgba(37, 99, 235, 0.12) 0%, rgba(37, 99, 235, 0) 70%)',
+          }}
+        />
+      </div>
 
-      <div className="relative z-10 w-full max-w-5xl grid grid-cols-1 lg:grid-cols-12 gap-8 lg:gap-10 items-stretch">
+      <div className="relative z-10 w-full max-w-5xl grid grid-cols-1 lg:grid-cols-12 gap-8 lg:gap-10 items-stretch my-auto">
         {/* Desktop Left Brand Showcase */}
         <div className="hidden lg:flex lg:col-span-6 flex-col justify-between p-9 rounded-2xl bg-[#111622] border border-slate-800/90 shadow-2xl">
           <div>
@@ -886,6 +931,30 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
                           </button>
                         )}
 
+                        {formErrorCode === 'email-already-exists' && mode === 'signup' && (
+                          <button
+                            type="button"
+                            onClick={() => switchMode('signin')}
+                            className="ml-6 inline-flex items-center gap-1.5 text-xs font-semibold text-cyan-300 hover:text-cyan-200 underline underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 rounded"
+                          >
+                            <span>Switch to Sign In</span>
+                            <ArrowRight className="w-3.5 h-3.5" aria-hidden="true" />
+                          </button>
+                        )}
+
+                        {formErrorCode === 'wrong-credentials' &&
+                          mode === 'signin' &&
+                          !authConfig.disableSignup && (
+                            <button
+                              type="button"
+                              onClick={() => switchMode('signup')}
+                              className="ml-6 inline-flex items-center gap-1.5 text-xs font-semibold text-cyan-300 hover:text-cyan-200 underline underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 rounded"
+                            >
+                              <span>New here? Create an account</span>
+                              <ArrowRight className="w-3.5 h-3.5" aria-hidden="true" />
+                            </button>
+                          )}
+
                         {formErrorCode === 'oauth-iframe-blocked' &&
                           typeof window !== 'undefined' && (
                             <a
@@ -1028,7 +1097,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
                         }}
                         placeholder={
                           mode === 'signup'
-                            ? 'At least 8 characters with a number'
+                            ? passwordRequirementHint
                             : 'Enter your password'
                         }
                         aria-invalid={Boolean(fieldErrors.password)}
@@ -1381,7 +1450,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
                           setResetNewPassword(e.target.value);
                           if (resetError) setResetError(null);
                         }}
-                        placeholder="At least 8 characters with a number"
+                        placeholder={passwordRequirementHint}
                         className="w-full min-h-[44px] bg-[#0D121D] border border-slate-800 focus:border-cyan-500 rounded-xl pl-10 pr-12 py-2.5 text-sm text-white placeholder:text-slate-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400"
                       />
                       <button

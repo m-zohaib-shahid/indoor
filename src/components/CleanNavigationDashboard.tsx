@@ -25,6 +25,7 @@ import {
   Edit3,
   RefreshCw,
   Layers,
+  Tag,
 } from 'lucide-react';
 import {
   BuildingPeer,
@@ -59,6 +60,22 @@ import {
   savePresenceProfile,
   SavedPresenceProfile,
 } from '../services/presenceService';
+import {
+  clusterCrowdedMarkers,
+  getAdaptivePinScale,
+  getPersonInitials,
+  getShortPersonLabel,
+  LabelRect,
+  LabelVisibilityMode,
+  MarkerCluster,
+  placeCollisionAwareLabel,
+  PlacedLabelResult,
+  SpatialMarkerItem,
+} from '../utils/mapLabelEngine';
+import hassaanAvatarUrl from '../assets/images/avatar_hassaan_tariq_1795517014448.jpg';
+import sarahAvatarUrl from '../assets/images/avatar_sarah_jenkins_1795517014872.jpg';
+import marcusAvatarUrl from '../assets/images/avatar_marcus_vance_1795517013866.jpg';
+import elenaAvatarUrl from '../assets/images/avatar_elena_rostova_1795517014872.jpg';
 
 interface CleanNavigationDashboardProps {
   currentUser: { name: string; role: string; email: string; avatarUrl?: string };
@@ -271,88 +288,7 @@ function createInitialBeacons(poseX: number, poseY: number): TelemetryBeaconSnap
         x: expectedRssi,
       },
     };
-  });
-}
-
-interface LabelRect {
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-}
-
-function getShortPersonLabel(fullName: string): string {
-  const parts = fullName.trim().split(/\s+/).filter(Boolean);
-  if (parts.length === 0) return 'Visitor';
-  if (/^(dr|mr|mrs|ms|prof)\.?$/i.test(parts[0]) && parts.length >= 2) {
-    return `${parts[0]} ${parts[1]}`;
-  }
-  return parts[0];
-}
-
-function rectsOverlap(a: LabelRect, b: LabelRect, pad = 4): boolean {
-  return !(
-    a.x + a.w + pad <= b.x ||
-    b.x + b.w + pad <= a.x ||
-    a.y + a.h + pad <= b.y ||
-    b.y + b.h + pad <= a.y
-  );
-}
-
-function placeNonOverlappingLabel(
-  anchorX: number,
-  anchorY: number,
-  pinRadius: number,
-  boxW: number,
-  boxH: number,
-  viewW: number,
-  viewH: number,
-  occupied: LabelRect[],
-  preferredOrder: Array<'above' | 'below' | 'right' | 'left'> = ['above', 'below', 'right', 'left']
-): LabelRect {
-  const clampRect = (rx: number, ry: number): LabelRect => ({
-    x: Math.max(8, Math.min(viewW - boxW - 8, rx)),
-    y: Math.max(8, Math.min(viewH - boxH - 8, ry)),
-    w: boxW,
-    h: boxH,
-  });
-
-  const candidates: LabelRect[] = preferredOrder.map((dir) => {
-    if (dir === 'above') {
-      return clampRect(anchorX - boxW / 2, anchorY - pinRadius - boxH - 7);
-    }
-    if (dir === 'below') {
-      return clampRect(anchorX - boxW / 2, anchorY + pinRadius + 7);
-    }
-    if (dir === 'right') {
-      return clampRect(anchorX + pinRadius + 8, anchorY - boxH / 2);
-    }
-    return clampRect(anchorX - pinRadius - boxW - 8, anchorY - boxH / 2);
-  });
-
-  for (const cand of candidates) {
-    if (!occupied.some((occ) => rectsOverlap(cand, occ))) {
-      occupied.push(cand);
-      return cand;
-    }
-  }
-
-  const fallback = { ...candidates[0] };
-  for (let step = 1; step <= 4; step++) {
-    const shiftedUp = clampRect(fallback.x, fallback.y - step * (boxH + 4));
-    if (!occupied.some((occ) => rectsOverlap(shiftedUp, occ))) {
-      occupied.push(shiftedUp);
-      return shiftedUp;
-    }
-    const shiftedDown = clampRect(fallback.x, anchorY + pinRadius + 7 + step * (boxH + 4));
-    if (!occupied.some((occ) => rectsOverlap(shiftedDown, occ))) {
-      occupied.push(shiftedDown);
-      return shiftedDown;
-    }
-  }
-
-  occupied.push(fallback);
-  return fallback;
+  }  );
 }
 
 interface UserAvatarProps {
@@ -414,6 +350,12 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
     panY: 40,
   });
   const [is25DMode, setIs25DMode] = useState(false);
+  const [labelMode, setLabelMode] = useState<LabelVisibilityMode>('auto');
+  const [hoveredMarkerId, setHoveredMarkerId] = useState<string | null>(null);
+  const [selectedInspectId, setSelectedInspectId] = useState<string | null>(null);
+  const [isCanvasHoverInteractive, setIsCanvasHoverInteractive] = useState(false);
+  const [activeClusterPopover, setActiveClusterPopover] = useState<MarkerCluster | null>(null);
+  const renderedClustersRef = useRef<MarkerCluster[]>([]);
   const cameraRef = useRef<MapCamera>(camera);
   const cameraAnimRef = useRef<number | null>(null);
   const focusHighlightRef = useRef<{
@@ -424,9 +366,22 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
   } | null>(null);
   const isManualCameraRef = useRef(false);
 
+  const cycleLabelMode = useCallback(() => {
+    setLabelMode((prev) => (prev === 'auto' ? 'all' : prev === 'all' ? 'minimal' : 'auto'));
+  }, []);
+
   useEffect(() => {
     cameraRef.current = camera;
   }, [camera]);
+
+  useEffect(() => {
+    if (!activeClusterPopover) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setActiveClusterPopover(null);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [activeClusterPopover]);
 
   // Pointer & Touch gesture tracking for smooth pan/pinch-zoom without breaking tap selection
   const pointerStateRef = useRef<{
@@ -466,6 +421,7 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
       floor: 1,
       isOnline: true,
       avatarColor: '#F59E0B',
+      avatarUrl: hassaanAvatarUrl,
       lastUpdated: 'Live',
     },
     {
@@ -479,6 +435,7 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
       floor: 1,
       isOnline: true,
       avatarColor: '#EC4899',
+      avatarUrl: sarahAvatarUrl,
       lastUpdated: 'Live',
     },
     {
@@ -492,6 +449,7 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
       floor: 1,
       isOnline: true,
       avatarColor: '#38BDF8',
+      avatarUrl: marcusAvatarUrl,
       lastUpdated: 'Live',
     },
     {
@@ -505,6 +463,7 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
       floor: 1,
       isOnline: true,
       avatarColor: '#10B981',
+      avatarUrl: elenaAvatarUrl,
       lastUpdated: 'Live',
     },
   ]);
@@ -661,12 +620,15 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
   const avatarImagesRef = useRef<Map<string, HTMLImageElement | 'loading' | 'error'>>(new Map());
   const [avatarLoadTick, setAvatarLoadTick] = useState(0);
 
-  // Preload OAuth profile avatars (Google/GitHub) with no-referrer for crisp canvas rendering
+  // Preload OAuth & Demo Bot profile avatars with no-referrer for crisp canvas rendering
   useEffect(() => {
     const urls: string[] = [];
     if (currentUser.avatarUrl) urls.push(currentUser.avatarUrl);
     liveUsers.forEach((lu) => {
       if (lu.avatarUrl) urls.push(lu.avatarUrl);
+    });
+    peers.forEach((p) => {
+      if (p.avatarUrl) urls.push(p.avatarUrl);
     });
 
     urls.forEach((url) => {
@@ -683,7 +645,7 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
       };
       img.src = url;
     });
-  }, [currentUser.avatarUrl, liveUsers]);
+  }, [currentUser.avatarUrl, liveUsers, peers]);
 
   // Connect & sync Live Multi-User Presence over InsForge Realtime channel 'live-indoor-users'
   useEffect(() => {
@@ -810,11 +772,11 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
   }, [cancelCameraAnimation]);
 
   const focusMapOnPoint = useCallback(
-    (worldX: number, worldY: number, highlightColor = '#38BDF8') => {
+    (worldX: number, worldY: number, highlightColor = '#38BDF8', minScale?: number) => {
       isManualCameraRef.current = true;
       const targetScale = Math.max(
         cameraRef.current.scale,
-        viewportSize.width < 640 ? 24 : 30
+        minScale ?? (viewportSize.width < 640 ? 24 : 30)
       );
       focusHighlightRef.current = {
         x: worldX,
@@ -2573,10 +2535,424 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
       }
     }
 
-    // 7. Current User Position Radar Puck & Directional Heading Cone
+    // 7. 4-Layer Smart Anti-Clutter User Markers, Micro-Clustering & Collision-Aware Labels
+    const pinScale = getAdaptivePinScale(scale);
     const ux = wx(userPose.x);
     const uy = wy(userPose.y);
+    const youAvatar = currentUser.avatarUrl
+      ? avatarImagesRef.current.get(currentUser.avatarUrl)
+      : undefined;
+    const youPinR = (youAvatar instanceof HTMLImageElement ? 11.5 : 8.5) * pinScale;
+    const isYouHovered = hoveredMarkerId === '__you__' || selectedInspectId === '__you__';
 
+    // Collect all remote live users + demo bots into unified SpatialMarkerItem list
+    const peerMarkers: SpatialMarkerItem[] = [
+      ...liveUsers.map((lu) => ({
+        id: lu.id,
+        kind: 'live' as const,
+        name: lu.name,
+        subtitle: `${lu.device} · Live`,
+        x: lu.x,
+        y: lu.y,
+        screenX: wx(lu.x),
+        screenY: wy(lu.y),
+        color: lu.color,
+        avatarUrl: lu.avatarUrl,
+        isTarget: targetLiveUserId === lu.id,
+        isHovered: hoveredMarkerId === lu.id || selectedInspectId === lu.id,
+        isLive: true,
+      })),
+      ...displayedDemoBots.map((peer) => ({
+        id: peer.id,
+        kind: 'demo' as const,
+        name: peer.fullName,
+        subtitle: `${peer.department} · ${peer.role}`,
+        x: peer.x,
+        y: peer.y,
+        screenX: wx(peer.x),
+        screenY: wy(peer.y),
+        color: peer.avatarColor,
+        avatarUrl: peer.avatarUrl,
+        isTarget: targetPeerId === peer.id,
+        isHovered: hoveredMarkerId === peer.id || selectedInspectId === peer.id,
+        isLive: false,
+      })),
+    ];
+
+    const { clusters, singles } = clusterCrowdedMarkers(peerMarkers, scale);
+    renderedClustersRef.current = clusters;
+
+    // Reserve physical pin & cluster pill footprints in occupiedLabels first so labels never sit on pins
+    occupiedLabels.push({
+      x: ux - youPinR - 2,
+      y: uy - youPinR - 2,
+      w: (youPinR + 2) * 2,
+      h: (youPinR + 2) * 2,
+    });
+
+    const singlePinRadii = new Map<string, number>();
+    singles.forEach((m) => {
+      const hasImg = Boolean(m.avatarUrl && avatarImagesRef.current.get(m.avatarUrl) instanceof HTMLImageElement);
+      const baseR = m.isTarget
+        ? hasImg
+          ? 11.5
+          : 8.5
+        : m.isHovered
+          ? hasImg
+            ? 11
+            : 8
+          : m.isLive
+            ? hasImg
+              ? 10.5
+              : 7.8
+            : hasImg
+              ? 8.5
+              : 5.5;
+      const pinR = baseR * pinScale;
+      singlePinRadii.set(m.id, pinR);
+      occupiedLabels.push({
+        x: m.screenX - pinR - 1,
+        y: m.screenY - pinR - 1,
+        w: (pinR + 1) * 2,
+        h: (pinR + 1) * 2,
+      });
+    });
+
+    const clusterMetrics = clusters.map((c) => {
+      const visibleAvatars = Math.min(3, c.members.length);
+      const avatarR = 9.5 * pinScale;
+      const overlapStep = 11 * pinScale;
+      const stackW = avatarR * 2 + Math.max(0, visibleAvatars - 1) * overlapStep;
+      const countText = `${c.members.length} users`;
+      ctx.font = '700 10.5px "Plus Jakarta Sans", system-ui, sans-serif';
+      const countW = ctx.measureText(countText).width;
+      const pillH = Math.round(28 * Math.max(0.88, pinScale));
+      const pillW = Math.round(8 + stackW + 7 + countW + 10);
+      const rect: LabelRect = {
+        x: c.screenX - pillW / 2,
+        y: c.screenY - pillH / 2,
+        w: pillW,
+        h: pillH,
+      };
+      occupiedLabels.push(rect);
+      return { cluster: c, visibleAvatars, avatarR, overlapStep, countText, pillW, pillH, rect };
+    });
+
+    // Z-Index Label Queue: priority 4 = Active Target, 3 = You, 2 = Hovered/Tapped, 1 = Peers
+    interface QueuedLabel {
+      priority: number;
+      placed: PlacedLabelResult;
+      connectorColor: string;
+      draw: () => void;
+    }
+    const labelQueue: QueuedLabel[] = [];
+
+    // Helper: schedule a full name pill label
+    const queueFullPillLabel = (
+      priority: number,
+      anchorX: number,
+      anchorY: number,
+      pinR: number,
+      text: string,
+      opts: {
+        bg: string;
+        border: string;
+        textColor: string;
+        liveDot?: boolean;
+        preferred?: Array<'above' | 'below' | 'right' | 'left'>;
+      }
+    ) => {
+      ctx.font = priority >= 3 ? '700 10.5px "Plus Jakarta Sans", system-ui, sans-serif' : '600 10.5px "Plus Jakarta Sans", system-ui, sans-serif';
+      const dotSpace = opts.liveDot ? 11 : 0;
+      const boxW = ctx.measureText(text).width + 14 + dotSpace;
+      const boxH = 21;
+      const placed = placeCollisionAwareLabel(
+        anchorX,
+        anchorY,
+        pinR,
+        boxW,
+        boxH,
+        viewW,
+        viewH,
+        occupiedLabels,
+        opts.preferred ?? ['above', 'below', 'right', 'left']
+      );
+
+      labelQueue.push({
+        priority,
+        placed,
+        connectorColor: opts.border,
+        draw: () => {
+          const { rect } = placed;
+          ctx.save();
+          ctx.translate(rect.x + rect.w / 2, rect.y + rect.h / 2);
+          ctx.scale(1, labelYScale);
+          ctx.fillStyle = opts.bg;
+          ctx.beginPath();
+          ctx.roundRect(-rect.w / 2, -rect.h / 2, rect.w, rect.h, 6);
+          ctx.fill();
+          ctx.strokeStyle = opts.border;
+          ctx.lineWidth = priority >= 3 ? 1.25 : 1;
+          ctx.stroke();
+
+          if (opts.liveDot) {
+            ctx.fillStyle = '#34D399';
+            ctx.beginPath();
+            ctx.arc(-rect.w / 2 + 8.5, 0, 2.6, 0, Math.PI * 2);
+            ctx.fill();
+          }
+
+          ctx.font = priority >= 3 ? '700 10.5px "Plus Jakarta Sans", system-ui, sans-serif' : '600 10.5px "Plus Jakarta Sans", system-ui, sans-serif';
+          ctx.fillStyle = opts.textColor;
+          ctx.fillText(text, -rect.w / 2 + 7 + dotSpace, -rect.h / 2 + 14);
+          ctx.restore();
+        },
+      });
+    };
+
+    // Helper: schedule compact circular Initial Badge (e.g., HT, SJ, EL + tiny emerald LIVE dot)
+    const queueInitialBadge = (m: SpatialMarkerItem, pinR: number) => {
+      const initials = getPersonInitials(m.name);
+      const badgeSize = 20;
+      const placed = placeCollisionAwareLabel(
+        m.screenX,
+        m.screenY,
+        pinR,
+        badgeSize,
+        badgeSize,
+        viewW,
+        viewH,
+        occupiedLabels,
+        ['below', 'right', 'above', 'left']
+      );
+
+      labelQueue.push({
+        priority: 1,
+        placed,
+        connectorColor: `${m.color}88`,
+        draw: () => {
+          const { rect } = placed;
+          const cx = rect.x + rect.w / 2;
+          const cy = rect.y + rect.h / 2;
+          const r = badgeSize / 2;
+
+          ctx.save();
+          ctx.translate(cx, cy);
+          ctx.scale(1, labelYScale);
+          ctx.fillStyle = 'rgba(17, 22, 34, 0.94)';
+          ctx.beginPath();
+          ctx.arc(0, 0, r, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.strokeStyle = m.isLive ? m.color : `${m.color}99`;
+          ctx.lineWidth = 1.2;
+          ctx.stroke();
+
+          ctx.font = '700 8.5px "JetBrains Mono", monospace';
+          ctx.textAlign = 'center';
+          ctx.fillStyle = '#F8FAFC';
+          ctx.fillText(initials, 0, 3);
+          ctx.textAlign = 'left';
+
+          if (m.isLive) {
+            ctx.fillStyle = '#34D399';
+            ctx.beginPath();
+            ctx.arc(r * 0.72, -r * 0.72, 2.7, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.strokeStyle = '#0B0F17';
+            ctx.lineWidth = 1;
+            ctx.stroke();
+          }
+          ctx.restore();
+        },
+      });
+    };
+
+    // Schedule labels in strict priority order (Active Target > You > Hovered > Peers)
+    // 1) Active Target (Priority 4)
+    singles
+      .filter((m) => m.isTarget)
+      .forEach((m) => {
+        if (labelMode === 'minimal' && !m.isHovered) return;
+        const pinR = singlePinRadii.get(m.id) ?? 9;
+        queueFullPillLabel(4, m.screenX, m.screenY, pinR, m.name, {
+          bg: 'rgba(17, 22, 34, 0.98)',
+          border: m.isLive ? '#34D399' : '#F59E0B',
+          textColor: m.isLive ? '#ECFDF5' : '#FDE68A',
+          liveDot: m.isLive,
+          preferred: ['above', 'below', 'right', 'left'],
+        });
+      });
+
+    // 2) Current User "You" (Priority 3)
+    if (labelMode !== 'minimal' || isYouHovered) {
+      const youText = presenceProfile ? `You · ${getShortPersonLabel(presenceProfile.name)}` : 'You';
+      queueFullPillLabel(3, ux, uy, youPinR, youText, {
+        bg: 'rgba(30, 58, 138, 0.96)',
+        border: 'rgba(147, 197, 253, 0.92)',
+        textColor: '#FFFFFF',
+        preferred: ['below', 'above', 'left', 'right'],
+      });
+    }
+
+    // 3) Hovered / Tapped non-target peers (Priority 2)
+    singles
+      .filter((m) => !m.isTarget && m.isHovered)
+      .forEach((m) => {
+        const pinR = singlePinRadii.get(m.id) ?? 9;
+        queueFullPillLabel(2, m.screenX, m.screenY, pinR, m.name, {
+          bg: 'rgba(17, 22, 34, 0.97)',
+          border: m.color,
+          textColor: '#F8FAFC',
+          liveDot: m.isLive,
+          preferred: ['above', 'below', 'right', 'left'],
+        });
+      });
+
+    // 4) Other Peers (Priority 1) — live users before demo bots
+    const remainingPeers = singles
+      .filter((m) => !m.isTarget && !m.isHovered)
+      .sort((a, b) => Number(b.isLive) - Number(a.isLive));
+
+    remainingPeers.forEach((m) => {
+      const pinR = singlePinRadii.get(m.id) ?? 7;
+      if (labelMode === 'all') {
+        queueFullPillLabel(1, m.screenX, m.screenY, pinR, m.isLive ? m.name : getShortPersonLabel(m.name), {
+          bg: 'rgba(17, 22, 34, 0.94)',
+          border: m.isLive ? `${m.color}CC` : 'rgba(148, 163, 184, 0.45)',
+          textColor: m.isLive ? '#F8FAFC' : '#CBD5E1',
+          liveDot: m.isLive,
+          preferred: ['above', 'below', 'right', 'left'],
+        });
+      } else if (labelMode === 'auto') {
+        queueInitialBadge(m, pinR);
+      }
+      // In 'minimal' mode: compact avatar dots only
+    });
+
+    // --- Paint Pins in Clean Visual Layer Order (Peers -> Hovered -> Clusters -> You -> Active Target) ---
+    const drawPeerPin = (m: SpatialMarkerItem) => {
+      const pinR = singlePinRadii.get(m.id) ?? 8;
+      const img = m.avatarUrl ? avatarImagesRef.current.get(m.avatarUrl) : undefined;
+
+      if (m.isTarget) {
+        ctx.strokeStyle = m.isLive ? m.color : `rgba(245, 158, 11, ${0.85 * (1 - pulseAnim)})`;
+        ctx.lineWidth = 2.4;
+        ctx.beginPath();
+        ctx.arc(m.screenX, m.screenY, pinR + 2 + pulseAnim * 18, 0, Math.PI * 2);
+        ctx.stroke();
+      } else if (m.isLive || m.isHovered) {
+        ctx.fillStyle = `${m.color}28`;
+        ctx.beginPath();
+        ctx.arc(m.screenX, m.screenY, pinR + 4.5, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      if (img instanceof HTMLImageElement) {
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(m.screenX, m.screenY, pinR, 0, Math.PI * 2);
+        ctx.clip();
+        ctx.drawImage(img, m.screenX - pinR, m.screenY - pinR, pinR * 2, pinR * 2);
+        ctx.restore();
+
+        ctx.strokeStyle = m.isTarget ? (m.isLive ? '#FFFFFF' : '#F59E0B') : m.isHovered ? '#FFFFFF' : `${m.color}DD`;
+        ctx.lineWidth = m.isTarget ? 2.5 : 1.8;
+        ctx.beginPath();
+        ctx.arc(m.screenX, m.screenY, pinR, 0, Math.PI * 2);
+        ctx.stroke();
+
+        if (m.isTarget) {
+          ctx.strokeStyle = '#FFFFFF';
+          ctx.lineWidth = 1.3;
+          ctx.beginPath();
+          ctx.arc(m.screenX, m.screenY, pinR + 1.5, 0, Math.PI * 2);
+          ctx.stroke();
+        }
+      } else {
+        ctx.fillStyle = m.isTarget && !m.isLive ? '#F59E0B' : m.color;
+        ctx.beginPath();
+        ctx.arc(m.screenX, m.screenY, pinR, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = m.isTarget || m.isLive ? '#FFFFFF' : '#090A0F';
+        ctx.lineWidth = m.isTarget || m.isLive ? 2.2 : 1.6;
+        ctx.stroke();
+      }
+
+      if (m.isLive) {
+        ctx.fillStyle = '#34D399';
+        ctx.beginPath();
+        ctx.arc(m.screenX + pinR * 0.72, m.screenY - pinR * 0.72, 2.8 * pinScale, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = '#090A0F';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      }
+    };
+
+    // Draw non-focused peer pins first
+    singles.filter((m) => !m.isTarget && !m.isHovered).forEach(drawPeerPin);
+    singles.filter((m) => !m.isTarget && m.isHovered).forEach(drawPeerPin);
+
+    // Draw Proximity Cluster Pills (stacked mini-avatars + "+N" / "N users" badge)
+    clusterMetrics.forEach(({ cluster, visibleAvatars, avatarR, overlapStep, countText, pillW, pillH }) => {
+      const hasAnyLive = cluster.members.some((m) => m.isLive);
+      const isClusterOpen = activeClusterPopover?.id === cluster.id;
+      const isClusterHovered = hoveredMarkerId === cluster.id;
+
+      ctx.save();
+      ctx.translate(cluster.screenX, cluster.screenY);
+      ctx.scale(1, labelYScale);
+
+      ctx.shadowColor = 'rgba(0, 0, 0, 0.55)';
+      ctx.shadowBlur = 12;
+      ctx.fillStyle = 'rgba(17, 22, 34, 0.96)';
+      ctx.beginPath();
+      ctx.roundRect(-pillW / 2, -pillH / 2, pillW, pillH, pillH / 2);
+      ctx.fill();
+      ctx.shadowBlur = 0;
+
+      ctx.strokeStyle = isClusterOpen || isClusterHovered
+        ? '#38BDF8'
+        : hasAnyLive
+          ? 'rgba(52, 211, 153, 0.65)'
+          : 'rgba(148, 163, 184, 0.45)';
+      ctx.lineWidth = isClusterOpen ? 1.8 : 1.25;
+      ctx.stroke();
+
+      // Stacked mini-avatars
+      const startAvatarX = -pillW / 2 + 8 + avatarR;
+      for (let idx = visibleAvatars - 1; idx >= 0; idx--) {
+        const mem = cluster.members[idx];
+        const ax = startAvatarX + idx * overlapStep;
+        const img = mem.avatarUrl ? avatarImagesRef.current.get(mem.avatarUrl) : undefined;
+        if (img instanceof HTMLImageElement) {
+          ctx.save();
+          ctx.beginPath();
+          ctx.arc(ax, 0, avatarR, 0, Math.PI * 2);
+          ctx.clip();
+          ctx.drawImage(img, ax - avatarR, -avatarR, avatarR * 2, avatarR * 2);
+          ctx.restore();
+        } else {
+          ctx.fillStyle = mem.color;
+          ctx.beginPath();
+          ctx.arc(ax, 0, avatarR, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        ctx.strokeStyle = '#111622';
+        ctx.lineWidth = 1.6;
+        ctx.beginPath();
+        ctx.arc(ax, 0, avatarR, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+
+      const textStartX = -pillW / 2 + 8 + avatarR * 2 + Math.max(0, visibleAvatars - 1) * overlapStep + 7;
+      ctx.font = '700 10.5px "Plus Jakarta Sans", system-ui, sans-serif';
+      ctx.fillStyle = hasAnyLive ? '#ECFDF5' : '#F8FAFC';
+      ctx.fillText(countText, textStartX, 3.5);
+      ctx.restore();
+    });
+
+    // Draw Current User Radar Puck ("You")
     ctx.fillStyle = 'rgba(59, 130, 246, 0.1)';
     ctx.beginPath();
     ctx.arc(ux, uy, userPose.accuracy * scale, 0, Math.PI * 2);
@@ -2601,13 +2977,8 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
       : `rgba(59, 130, 246, ${0.85 * (1 - pulseAnim)})`;
     ctx.lineWidth = 2.4;
     ctx.beginPath();
-    ctx.arc(ux, uy, 9 + pulseAnim * 21, 0, Math.PI * 2);
+    ctx.arc(ux, uy, youPinR + 1 + pulseAnim * 20, 0, Math.PI * 2);
     ctx.stroke();
-
-    const youAvatar = currentUser.avatarUrl
-      ? avatarImagesRef.current.get(currentUser.avatarUrl)
-      : undefined;
-    const youPinR = youAvatar instanceof HTMLImageElement ? 12 : 8.5;
 
     if (youAvatar instanceof HTMLImageElement) {
       ctx.save();
@@ -2618,15 +2989,15 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
       ctx.restore();
 
       ctx.strokeStyle = isWallBlocked ? '#F43F5E' : '#3B82F6';
-      ctx.lineWidth = 3;
+      ctx.lineWidth = 2.8;
       ctx.beginPath();
       ctx.arc(ux, uy, youPinR, 0, Math.PI * 2);
       ctx.stroke();
 
       ctx.strokeStyle = '#FFFFFF';
-      ctx.lineWidth = 1.5;
+      ctx.lineWidth = 1.4;
       ctx.beginPath();
-      ctx.arc(ux, uy, youPinR + 1.5, 0, Math.PI * 2);
+      ctx.arc(ux, uy, youPinR + 1.4, 0, Math.PI * 2);
       ctx.stroke();
     } else {
       ctx.fillStyle = isWallBlocked ? '#F43F5E' : '#3B82F6';
@@ -2634,218 +3005,30 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
       ctx.arc(ux, uy, youPinR, 0, Math.PI * 2);
       ctx.fill();
       ctx.strokeStyle = '#FFFFFF';
-      ctx.lineWidth = 2.5;
+      ctx.lineWidth = 2.4;
       ctx.stroke();
     }
 
-    occupiedLabels.push({
-      x: ux - youPinR - 2,
-      y: uy - youPinR - 2,
-      w: (youPinR + 2) * 2,
-      h: (youPinR + 2) * 2,
-    });
+    // Draw Active Target Pin above "You" pin if targeted
+    singles.filter((m) => m.isTarget).forEach(drawPeerPin);
 
-    const youText = presenceProfile ? `You · ${getShortPersonLabel(presenceProfile.name)}` : 'You';
-    ctx.font = '700 10.5px "Plus Jakarta Sans", system-ui, sans-serif';
-    const youBoxW = ctx.measureText(youText).width + 14;
-    const youBoxH = 20;
-    const youRect = placeNonOverlappingLabel(
-      ux,
-      uy,
-      youPinR,
-      youBoxW,
-      youBoxH,
-      viewW,
-      viewH,
-      occupiedLabels,
-      ['below', 'above', 'left', 'right']
-    );
-
-    ctx.save();
-    ctx.translate(youRect.x + youRect.w / 2, youRect.y + youRect.h / 2);
-    ctx.scale(1, labelYScale);
-    ctx.fillStyle = 'rgba(30, 58, 138, 0.96)';
-    ctx.beginPath();
-    ctx.roundRect(-youRect.w / 2, -youRect.h / 2, youRect.w, youRect.h, 6);
-    ctx.fill();
-    ctx.strokeStyle = 'rgba(147, 197, 253, 0.9)';
-    ctx.lineWidth = 1;
-    ctx.stroke();
-    ctx.fillStyle = '#FFFFFF';
-    ctx.fillText(youText, -youRect.w / 2 + 7, -youRect.h / 2 + 13.5);
-    ctx.restore();
-
-    // 7.5 Live Connected Users (Vibrant High-Contrast Pins + LIVE Emerald Indicator)
-    liveUsers.forEach((lu) => {
-      const lx = wx(lu.x);
-      const ly = wy(lu.y);
-      const isTarget = targetLiveUserId === lu.id;
-
-      ctx.fillStyle = `${lu.color}30`;
-      ctx.beginPath();
-      ctx.arc(lx, ly, isTarget ? 16 + pulseAnim * 12 : 14, 0, Math.PI * 2);
-      ctx.fill();
-
-      if (isTarget) {
-        ctx.strokeStyle = lu.color;
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-        ctx.arc(lx, ly, 10 + pulseAnim * 20, 0, Math.PI * 2);
-        ctx.stroke();
-      }
-
-      const luAvatar = lu.avatarUrl ? avatarImagesRef.current.get(lu.avatarUrl) : undefined;
-      const luPinR = luAvatar instanceof HTMLImageElement ? 11.5 : 8;
-      if (luAvatar instanceof HTMLImageElement) {
-        ctx.save();
-        ctx.beginPath();
-        ctx.arc(lx, ly, luPinR, 0, Math.PI * 2);
-        ctx.clip();
-        ctx.drawImage(luAvatar, lx - luPinR, ly - luPinR, luPinR * 2, luPinR * 2);
-        ctx.restore();
-
-        ctx.strokeStyle = isTarget ? '#FFFFFF' : lu.color;
-        ctx.lineWidth = 2.5;
-        ctx.beginPath();
-        ctx.arc(lx, ly, luPinR, 0, Math.PI * 2);
-        ctx.stroke();
-      } else {
-        ctx.fillStyle = lu.color;
-        ctx.beginPath();
-        ctx.arc(lx, ly, luPinR, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.strokeStyle = '#FFFFFF';
-        ctx.lineWidth = 2.5;
-        ctx.stroke();
-      }
-
-      occupiedLabels.push({
-        x: lx - luPinR - 1,
-        y: ly - luPinR - 1,
-        w: (luPinR + 1) * 2,
-        h: (luPinR + 1) * 2,
+    // Paint Connector Hairlines & Labels in ascending priority order (1 -> 2 -> 3 -> 4)
+    labelQueue
+      .sort((a, b) => a.priority - b.priority)
+      .forEach((item) => {
+        if (item.placed.needsConnector) {
+          ctx.save();
+          ctx.strokeStyle = item.connectorColor;
+          ctx.globalAlpha = 0.52;
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(item.placed.anchorEdgeX, item.placed.anchorEdgeY);
+          ctx.lineTo(item.placed.labelEdgeX, item.placed.labelEdgeY);
+          ctx.stroke();
+          ctx.restore();
+        }
+        item.draw();
       });
-
-      const tagText = lu.name;
-      ctx.font = '600 11px "Plus Jakarta Sans", system-ui, sans-serif';
-      const pillW = ctx.measureText(tagText).width + 24;
-      const pillH = 22;
-      const pillRect = placeNonOverlappingLabel(
-        lx,
-        ly,
-        luPinR,
-        pillW,
-        pillH,
-        viewW,
-        viewH,
-        occupiedLabels,
-        ['above', 'right', 'left', 'below']
-      );
-
-      ctx.save();
-      ctx.translate(pillRect.x + pillRect.w / 2, pillRect.y + pillRect.h / 2);
-      ctx.scale(1, labelYScale);
-      ctx.fillStyle = 'rgba(17, 22, 34, 0.96)';
-      ctx.beginPath();
-      ctx.roundRect(-pillRect.w / 2, -pillRect.h / 2, pillRect.w, pillRect.h, 6);
-      ctx.fill();
-      ctx.strokeStyle = isTarget ? '#FFFFFF' : `${lu.color}D0`;
-      ctx.lineWidth = 1.25;
-      ctx.stroke();
-
-      // Emerald LIVE dot inside tag
-      ctx.fillStyle = '#34D399';
-      ctx.beginPath();
-      ctx.arc(-pillRect.w / 2 + 8.5, 0, 2.7, 0, Math.PI * 2);
-      ctx.fill();
-
-      ctx.fillStyle = '#F8FAFC';
-      ctx.fillText(tagText, -pillRect.w / 2 + 15, -pillRect.h / 2 + 14.5);
-      ctx.restore();
-    });
-
-    // 7.6 Building Demo Bots (Subtly Muted unless Targeted)
-    displayedDemoBots.forEach((peer) => {
-      const px = wx(peer.x);
-      const py = wy(peer.y);
-      const isTarget = targetPeerId === peer.id;
-
-      if (isTarget) {
-        ctx.strokeStyle = `rgba(245, 158, 11, ${0.85 * (1 - pulseAnim)})`;
-        ctx.lineWidth = 2.5;
-        ctx.beginPath();
-        ctx.arc(px, py, 9 + pulseAnim * 22, 0, Math.PI * 2);
-        ctx.stroke();
-
-        ctx.fillStyle = '#F59E0B';
-        ctx.beginPath();
-        ctx.arc(px, py, 8, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.strokeStyle = '#FFFFFF';
-        ctx.lineWidth = 2.5;
-        ctx.stroke();
-
-        const labelText = peer.fullName;
-        ctx.font = '600 11px "Plus Jakarta Sans", system-ui, sans-serif';
-        const boxW = ctx.measureText(labelText).width + 14;
-        const boxH = 22;
-        const labelRect = placeNonOverlappingLabel(
-          px,
-          py,
-          8,
-          boxW,
-          boxH,
-          viewW,
-          viewH,
-          occupiedLabels,
-          ['above', 'below', 'left', 'right']
-        );
-
-        ctx.save();
-        ctx.translate(labelRect.x + labelRect.w / 2, labelRect.y + labelRect.h / 2);
-        ctx.scale(1, labelYScale);
-        ctx.fillStyle = 'rgba(17, 22, 34, 0.96)';
-        ctx.beginPath();
-        ctx.roundRect(-labelRect.w / 2, -labelRect.h / 2, labelRect.w, labelRect.h, 6);
-        ctx.fill();
-        ctx.strokeStyle = 'rgba(245, 158, 11, 0.65)';
-        ctx.lineWidth = 1;
-        ctx.stroke();
-
-        ctx.fillStyle = '#FDE68A';
-        ctx.fillText(labelText, -labelRect.w / 2 + 7, -labelRect.h / 2 + 14.5);
-        ctx.restore();
-      } else {
-        ctx.fillStyle = '#475569';
-        ctx.beginPath();
-        ctx.arc(px, py, 4.8, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.strokeStyle = '#090A0F';
-        ctx.lineWidth = 1.8;
-        ctx.stroke();
-
-        ctx.font = '500 10px "Plus Jakarta Sans", system-ui, sans-serif';
-        const shortName = getShortPersonLabel(peer.fullName);
-        const textW = ctx.measureText(shortName).width;
-        const peerRect = placeNonOverlappingLabel(
-          px,
-          py,
-          5,
-          textW + 4,
-          14,
-          viewW,
-          viewH,
-          occupiedLabels,
-          ['below', 'above', 'right', 'left']
-        );
-        ctx.save();
-        ctx.translate(peerRect.x + 2, peerRect.y + 11);
-        ctx.scale(1, labelYScale);
-        ctx.fillStyle = 'rgba(148, 163, 184, 0.62)';
-        ctx.fillText(shortName, 0, 0);
-        ctx.restore();
-      }
-    });
 
     // 7.7 Raw Jitter vs. 1D Kalman Trilateration Comparison Overlay (Simulation)
     if (isSimulating && rawTrilatPose && kalmanTrilatPose) {
@@ -2921,6 +3104,10 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
     viewportSize,
     camera,
     is25DMode,
+    labelMode,
+    hoveredMarkerId,
+    selectedInspectId,
+    activeClusterPopover,
     userPose,
     activeRoute,
     displayedDemoBots,
@@ -2940,46 +3127,94 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
     kalmanTrilatPose,
   ]);
 
-  // Select live user / peer / room OR set laptop coordinate from canvas click coordinates (2D & 2.5D safe)
+  // Select cluster, live user, peer, room OR set laptop coordinate from canvas click coordinates (2D & 2.5D raycast safe)
   const selectMapTargetAtClientPoint = useCallback(
-    (clientX: number, clientY: number) => {
+    (clientX: number, clientY: number, localOffset?: { x: number; y: number }) => {
       const canvas = canvasRef.current;
       if (!canvas) return;
-      const rect = canvas.getBoundingClientRect();
-      const screenX = ((clientX - rect.left) / Math.max(1, rect.width)) * viewportSize.width;
-      const screenY = ((clientY - rect.top) / Math.max(1, rect.height)) * viewportSize.height;
+      let screenX: number;
+      let screenY: number;
+      if (localOffset) {
+        screenX = localOffset.x;
+        screenY = localOffset.y;
+      } else {
+        const rect = canvas.getBoundingClientRect();
+        screenX = ((clientX - rect.left) / Math.max(1, rect.width)) * viewportSize.width;
+        screenY = ((clientY - rect.top) / Math.max(1, rect.height)) * viewportSize.height;
+      }
       const meterX = (screenX - camera.panX) / camera.scale;
       const meterY = (screenY - camera.panY) / camera.scale;
 
       if (!isSpotPickerActive) {
+        // 1) Check proximity clusters first so tapping a crowded group opens the Cluster Popover
+        const hitCluster = renderedClustersRef.current.find(
+          (c) => Math.abs(screenX - c.screenX) <= 44 && Math.abs(screenY - c.screenY) <= 22
+        );
+        if (hitCluster) {
+          setActiveClusterPopover(hitCluster);
+          setSelectedInspectId(null);
+          return;
+        }
+
+        setActiveClusterPopover(null);
+
         const clickedLiveUser = liveUsers.find((u) => Math.hypot(u.x - meterX, u.y - meterY) < 1.8);
         if (clickedLiveUser) {
+          setSelectedInspectId(clickedLiveUser.id);
           setTargetLiveUserId(clickedLiveUser.id);
           setTargetPeerId(null);
           setTargetRoomId(null);
+          focusHighlightRef.current = {
+            x: clickedLiveUser.x,
+            y: clickedLiveUser.y,
+            color: clickedLiveUser.color,
+            until: Date.now() + 950,
+          };
           return;
         }
 
         if (showDemoBots) {
           const clickedPeer = peers.find((p) => Math.hypot(p.x - meterX, p.y - meterY) < 1.8);
           if (clickedPeer) {
+            setSelectedInspectId(clickedPeer.id);
             setTargetPeerId(clickedPeer.id);
             setTargetLiveUserId(null);
             setTargetRoomId(null);
+            focusHighlightRef.current = {
+              x: clickedPeer.x,
+              y: clickedPeer.y,
+              color: '#F59E0B',
+              until: Date.now() + 950,
+            };
             return;
           }
+        }
+
+        if (Math.hypot(userPose.x - meterX, userPose.y - meterY) < 1.5) {
+          setSelectedInspectId((prev) => (prev === '__you__' ? null : '__you__'));
+          return;
         }
 
         const clickedRoom = nodes.find(
           (n) => Math.hypot(n.x - meterX, n.y - meterY) < 2.2 && n.type === 'room'
         );
         if (clickedRoom) {
+          setSelectedInspectId(null);
           setTargetRoomId(clickedRoom.id);
           setTargetPeerId(null);
           setTargetLiveUserId(null);
+          focusHighlightRef.current = {
+            x: clickedRoom.x,
+            y: clickedRoom.y,
+            color: '#38BDF8',
+            until: Date.now() + 950,
+          };
           return;
         }
       }
+
+      setActiveClusterPopover(null);
+      setSelectedInspectId(null);
 
       // Laptop spot placement (or explicit Relocate Spot mode): click anywhere on the floor plan
       if (
@@ -3007,13 +3242,15 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
       liveUsers,
       showDemoBots,
       peers,
+      userPose.x,
+      userPose.y,
       nodes,
       deviceType,
       isSimulating,
     ]
   );
 
-  // Mouse pan & click handlers
+  // Mouse pan, hover inspection & click handlers
   const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
     cancelCameraAnimation();
     pointerStateRef.current.isDragging = true;
@@ -3026,7 +3263,51 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
 
   const handleMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
     const st = pointerStateRef.current;
-    if (!st.isDragging) return;
+    if (!st.isDragging) {
+      const screenX = e.nativeEvent.offsetX;
+      const screenY = e.nativeEvent.offsetY;
+      const meterX = (screenX - camera.panX) / camera.scale;
+      const meterY = (screenY - camera.panY) / camera.scale;
+
+      const hitCluster = renderedClustersRef.current.find(
+        (c) => Math.abs(screenX - c.screenX) <= 44 && Math.abs(screenY - c.screenY) <= 22
+      );
+      if (hitCluster) {
+        setHoveredMarkerId((prev) => (prev === hitCluster.id ? prev : hitCluster.id));
+        setIsCanvasHoverInteractive((prev) => (prev ? prev : true));
+        return;
+      }
+
+      const hoverLive = liveUsers.find((u) => Math.hypot(u.x - meterX, u.y - meterY) < 1.5);
+      if (hoverLive) {
+        setHoveredMarkerId((prev) => (prev === hoverLive.id ? prev : hoverLive.id));
+        setIsCanvasHoverInteractive((prev) => (prev ? prev : true));
+        return;
+      }
+
+      const hoverPeer = showDemoBots
+        ? peers.find((p) => Math.hypot(p.x - meterX, p.y - meterY) < 1.5)
+        : undefined;
+      if (hoverPeer) {
+        setHoveredMarkerId((prev) => (prev === hoverPeer.id ? prev : hoverPeer.id));
+        setIsCanvasHoverInteractive((prev) => (prev ? prev : true));
+        return;
+      }
+
+      if (Math.hypot(userPose.x - meterX, userPose.y - meterY) < 1.3) {
+        setHoveredMarkerId((prev) => (prev === '__you__' ? prev : '__you__'));
+        setIsCanvasHoverInteractive((prev) => (prev ? prev : true));
+        return;
+      }
+
+      const hoverRoom = nodes.some(
+        (n) => Math.hypot(n.x - meterX, n.y - meterY) < 2.0 && n.type === 'room'
+      );
+      setHoveredMarkerId((prev) => (prev === null ? prev : null));
+      setIsCanvasHoverInteractive((prev) => (prev === hoverRoom ? prev : hoverRoom));
+      return;
+    }
+
     const dx = e.clientX - st.startX;
     const dy = e.clientY - st.startY;
     st.movedPx = Math.max(st.movedPx, Math.hypot(dx, dy));
@@ -3049,14 +3330,16 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
     if (!st.isDragging) return;
     st.isDragging = false;
     if (st.movedPx < 6) {
-      selectMapTargetAtClientPoint(e.clientX, e.clientY);
+      selectMapTargetAtClientPoint(e.clientX, e.clientY, {
+        x: e.nativeEvent.offsetX,
+        y: e.nativeEvent.offsetY,
+      });
     }
   };
 
   const handleWheel = (e: React.WheelEvent<HTMLCanvasElement>) => {
-    const rect = e.currentTarget.getBoundingClientRect();
-    const fx = e.clientX - rect.left;
-    const fy = e.clientY - rect.top;
+    const fx = e.nativeEvent.offsetX;
+    const fy = e.nativeEvent.offsetY;
     const factor = e.deltaY < 0 ? 1.12 : 0.89;
     zoomBy(factor, fx, fy);
   };
@@ -3149,7 +3432,6 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
   const firstName = currentUser.name.trim().split(/\s+/)[0] || 'Navigator';
   const totalLiveOnlineCount = (presenceProfile ? 1 : 0) + liveUsers.length;
   const totalDirectoryPeopleCount = liveUsers.length + (showDemoBots ? peers.length : 0);
-  const onlinePeersCount = liveUsers.length + (showDemoBots ? peers.filter((p) => p.isOnline).length : 0);
   const positioningMode: 'Simulation' | 'Hardware BLE' | 'PDR Sensors' = isSimulating
     ? 'Simulation'
     : bleState === 'connected'
@@ -3354,16 +3636,16 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
                     }`}
                   >
                     <div className="flex items-center gap-3 min-w-0">
-                      <div
-                        className="w-9 h-9 rounded-lg flex items-center justify-center font-bold text-xs shrink-0"
+                      <UserAvatar
+                        src={peer.avatarUrl}
+                        name={peer.fullName}
+                        className="w-9 h-9 rounded-lg text-xs shrink-0"
                         style={{
                           backgroundColor: `${peer.avatarColor}20`,
                           color: peer.avatarColor,
                           border: `1px solid ${peer.avatarColor}45`,
                         }}
-                      >
-                        {peer.fullName[0]}
-                      </div>
+                      />
                       <div className="min-w-0">
                         <div className="font-semibold text-white text-sm truncate flex items-center gap-1.5">
                           <span className="truncate">{peer.fullName}</span>
@@ -3583,17 +3865,21 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
               onMouseUp={handleMouseUp}
               onMouseLeave={() => {
                 pointerStateRef.current.isDragging = false;
+                setHoveredMarkerId(null);
+                setIsCanvasHoverInteractive(false);
               }}
               onWheel={handleWheel}
               onTouchStart={handleTouchStart}
               onTouchMove={handleTouchMove}
               onTouchEnd={handleTouchEnd}
-              className="block w-full h-full cursor-grab active:cursor-grabbing touch-none"
+              className={`block w-full h-full touch-none ${
+                isCanvasHoverInteractive ? 'cursor-pointer' : 'cursor-grab active:cursor-grabbing'
+              }`}
             />
           </div>
         </div>
 
-        {/* Mobile Floating Sensor, 2.5D & Online Pill Controls (Top of Map) */}
+        {/* Mobile Floating Sensor, 2.5D, Labels & Online Pill Controls (Top of Map) */}
         <div className="lg:hidden flex items-start justify-between gap-2 absolute top-3 inset-x-3 z-20 pointer-events-none">
           <div className="flex flex-wrap items-center gap-1.5 pointer-events-auto">
             <button
@@ -3623,6 +3909,24 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
             >
               <Layers className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
               <span>{is25DMode ? '2.5D' : '2D'}</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={cycleLabelMode}
+              aria-label={`Map label visibility: ${labelMode}. Tap to cycle.`}
+              className={`min-h-[44px] px-2.5 rounded-xl text-xs font-medium border backdrop-blur-md transition-colors flex items-center gap-1 whitespace-nowrap focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 ${
+                labelMode === 'all'
+                  ? 'bg-sky-400/20 text-sky-200 border-sky-400/45'
+                  : labelMode === 'minimal'
+                    ? 'bg-[#111622]/92 text-slate-400 border-white/[0.1]'
+                    : 'bg-[#111622]/92 text-slate-200 border-white/[0.1]'
+              }`}
+            >
+              <Tag className="w-3.5 h-3.5 text-sky-400 shrink-0" aria-hidden="true" />
+              <span className="capitalize">
+                {labelMode === 'minimal' ? 'Min' : labelMode}
+              </span>
             </button>
 
             {motionSensorsActive && (
@@ -3739,6 +4043,29 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
           </div>
 
           <div className="flex items-center gap-2 pointer-events-auto">
+            {/* Compact Smart Label Visibility Toggle (Auto / All / Minimal) */}
+            <button
+              type="button"
+              onClick={cycleLabelMode}
+              title="Cycle map labels: Auto (smart initials) → All → Minimal"
+              aria-label={`Labels mode: ${labelMode}. Click to switch.`}
+              className={`min-h-[44px] flex items-center gap-1.5 px-3 rounded-xl text-xs font-semibold border backdrop-blur-md transition-colors whitespace-nowrap focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 ${
+                labelMode === 'all'
+                  ? 'bg-sky-400/18 text-sky-200 border-sky-400/45'
+                  : labelMode === 'minimal'
+                    ? 'bg-[#111622]/92 hover:bg-[#171E2E] text-slate-400 border-white/[0.1]'
+                    : 'bg-[#111622]/92 hover:bg-[#171E2E] text-slate-100 border-white/[0.12]'
+              }`}
+            >
+              <Tag className="w-3.5 h-3.5 text-sky-400 shrink-0" aria-hidden="true" />
+              <span>
+                Labels:{' '}
+                <span className="text-sky-300 capitalize">
+                  {labelMode === 'auto' ? 'Auto' : labelMode === 'all' ? 'All' : 'Minimal'}
+                </span>
+              </span>
+            </button>
+
             {/* Sleek 2D Plan / 2.5D Tilt Segmented Control */}
             <div
               role="group"
@@ -4054,6 +4381,106 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
                 </button>
               </div>
             </form>
+          </div>
+        )}
+
+        {/* Glass Popover Card for Clustered Users */}
+        {activeClusterPopover && (
+          <div
+            role="dialog"
+            aria-label={`Cluster of ${activeClusterPopover.members.length} users`}
+            style={{
+              left: `${Math.max(12, Math.min(viewportSize.width - 312, activeClusterPopover.screenX - 150))}px`,
+              top: `${Math.max(66, Math.min(viewportSize.height - 280, activeClusterPopover.screenY + 20))}px`,
+            }}
+            className="absolute z-40 w-[300px] max-w-[calc(100vw-24px)] max-h-[260px] bg-[#111622]/96 backdrop-blur-xl border border-white/[0.14] rounded-2xl shadow-2xl flex flex-col overflow-hidden animate-fade-in"
+          >
+            <div className="px-3.5 py-2.5 border-b border-white/[0.08] flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 min-w-0">
+                <Users className="w-3.5 h-3.5 text-sky-400 shrink-0" aria-hidden="true" />
+                <span className="text-xs font-bold text-white truncate">
+                  {activeClusterPopover.members.length} Users Nearby
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setActiveClusterPopover(null)}
+                aria-label="Close cluster list"
+                className="w-8 h-8 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 flex items-center justify-center shrink-0"
+              >
+                <X className="w-3.5 h-3.5" aria-hidden="true" />
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-2.5 space-y-1.5">
+              {activeClusterPopover.members.map((member) => {
+                const dist =
+                  walkableDistancesById.get(member.id) ??
+                  Math.hypot(member.x - userPose.x, member.y - userPose.y);
+                return (
+                  <div
+                    key={member.id}
+                    className="p-2 rounded-xl bg-[#0D121D] border border-white/[0.07] flex items-center justify-between gap-2"
+                  >
+                    <div className="flex items-center gap-2 min-w-0">
+                      <UserAvatar
+                        src={member.avatarUrl}
+                        name={member.name}
+                        className="w-8 h-8 rounded-lg text-xs shrink-0 border border-white/15"
+                        style={{
+                          backgroundColor: `${member.color}25`,
+                          color: member.color,
+                        }}
+                      />
+                      <div className="min-w-0">
+                        <div className="text-xs font-semibold text-white truncate flex items-center gap-1.5">
+                          <span className="truncate">{member.name}</span>
+                          {member.isLive && (
+                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shrink-0" />
+                          )}
+                        </div>
+                        <div className="text-[10px] text-slate-400 font-mono tabular-nums truncate">
+                          {dist.toFixed(1)} m · {member.isLive ? 'Live' : 'Demo'}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-1 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSelectedInspectId(member.id);
+                          setActiveClusterPopover(null);
+                          focusMapOnPoint(member.x, member.y, member.color, 48);
+                        }}
+                        className="min-h-[32px] px-2 rounded-lg text-[11px] font-medium bg-[#141B2B] hover:bg-slate-800 text-slate-200 border border-white/[0.08] transition-colors"
+                      >
+                        Focus
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (member.kind === 'live') {
+                            setTargetLiveUserId(member.id);
+                            setTargetPeerId(null);
+                          } else {
+                            setTargetPeerId(member.id);
+                            setTargetLiveUserId(null);
+                          }
+                          setTargetRoomId(null);
+                          setSelectedInspectId(member.id);
+                          setActiveClusterPopover(null);
+                          focusMapOnPoint(member.x, member.y, member.color, 46);
+                        }}
+                        className="min-h-[32px] px-2 rounded-lg text-[11px] font-semibold bg-sky-400 hover:bg-sky-300 text-slate-950 transition-colors"
+                      >
+                        Navigate
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
           </div>
         )}
 
