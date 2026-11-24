@@ -2,12 +2,16 @@ import { createClient } from '@insforge/sdk';
 
 const DEFAULT_INSFORGE_URL = 'https://ypbur365.us-east.insforge.app';
 
-const baseUrl =
+const rawBaseUrl =
   (typeof import.meta !== 'undefined' && import.meta.env?.VITE_INSFORGE_URL) ||
   DEFAULT_INSFORGE_URL;
+const baseUrl = String(rawBaseUrl).trim().replace(/\/+$/, '') || DEFAULT_INSFORGE_URL;
+
+const rawAnonKey =
+  typeof import.meta !== 'undefined' ? import.meta.env?.VITE_INSFORGE_ANON_KEY : undefined;
+const trimmedAnonKey = typeof rawAnonKey === 'string' ? rawAnonKey.trim() : '';
 const anonKey =
-  (typeof import.meta !== 'undefined' && import.meta.env?.VITE_INSFORGE_ANON_KEY) ||
-  undefined;
+  trimmedAnonKey && trimmedAnonKey !== 'MY_INSFORGE_ANON_KEY' ? trimmedAnonKey : undefined;
 
 export const hasInsForgeAnonKey = Boolean(anonKey);
 

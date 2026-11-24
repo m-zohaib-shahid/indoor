@@ -131,6 +131,8 @@ export class LiveFloorPresenceClient {
   private trailingTimer: number | null = null;
   private heartbeatTimer: number | null = null;
   private pruneTimer: number | null = null;
+  private emitBatchTimer: number | null = null;
+  private lastEmitAt = 0;
 
   private handleUserStateBound: (msg: PresenceStateMessage) => void;
   private handleUserLeaveBound: (msg: PresenceLeavePayload) => void;
@@ -233,6 +235,10 @@ export class LiveFloorPresenceClient {
       window.clearInterval(this.pruneTimer);
       this.pruneTimer = null;
     }
+    if (this.emitBatchTimer !== null) {
+      window.clearTimeout(this.emitBatchTimer);
+      this.emitBatchTimer = null;
+    }
 
     if (typeof window !== 'undefined') {
       window.removeEventListener('beforeunload', this.handleBeforeUnloadBound);
@@ -319,14 +325,25 @@ export class LiveFloorPresenceClient {
       lastSeen: Date.now(),
     };
 
+    const hadMeaningfulChange =
+      !existing ||
+      Math.abs(existing.x - updated.x) >= 0.01 ||
+      Math.abs(existing.y - updated.y) >= 0.01 ||
+      existing.name !== updated.name ||
+      existing.color !== updated.color ||
+      existing.avatarUrl !== updated.avatarUrl ||
+      existing.device !== updated.device;
+
     this.remoteUsers.set(updated.id, updated);
-    this.emitUsers();
+    if (hadMeaningfulChange) {
+      this.scheduleEmitUsers();
+    }
   }
 
   private onUserLeaveMessage(msg: PresenceLeavePayload): void {
     if (!msg || typeof msg.id !== 'string') return;
     if (this.remoteUsers.delete(msg.id)) {
-      this.emitUsers();
+      this.scheduleEmitUsers(true);
     }
   }
 
@@ -350,7 +367,7 @@ export class LiveFloorPresenceClient {
       }
     }
     if (changed) {
-      this.emitUsers();
+      this.scheduleEmitUsers(true);
     }
   }
 
@@ -364,12 +381,39 @@ export class LiveFloorPresenceClient {
       }
     }
     if (changed) {
+      this.scheduleEmitUsers(true);
+    }
+  }
+
+  private scheduleEmitUsers(immediate = false): void {
+    if (!this.isJoined) return;
+    const batchMs = 120;
+    const elapsed = Date.now() - this.lastEmitAt;
+
+    if (immediate || elapsed >= batchMs) {
+      if (this.emitBatchTimer !== null) {
+        window.clearTimeout(this.emitBatchTimer);
+        this.emitBatchTimer = null;
+      }
       this.emitUsers();
+      return;
+    }
+
+    if (this.emitBatchTimer === null) {
+      this.emitBatchTimer = window.setTimeout(() => {
+        this.emitBatchTimer = null;
+        this.emitUsers();
+      }, batchMs - elapsed);
     }
   }
 
   private emitUsers(): void {
-    const sorted = [...this.remoteUsers.values()].sort((a, b) => a.name.localeCompare(b.name));
+    this.lastEmitAt = Date.now();
+    const sorted = [...this.remoteUsers.values()].sort((a, b) => {
+      const an = a.name.toLowerCase();
+      const bn = b.name.toLowerCase();
+      return an < bn ? -1 : an > bn ? 1 : 0;
+    });
     this.onUsersChange(sorted);
   }
 }

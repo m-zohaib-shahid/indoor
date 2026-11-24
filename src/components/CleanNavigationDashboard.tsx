@@ -36,7 +36,8 @@ import {
   UserPose,
 } from '../types/simulator';
 import {
-  findWallFreePath,
+  computeDistanceFieldFromOrigin,
+  lookupWalkableDistance,
   rssiToDistance,
   runAStarBetweenCoordinates,
   simulateRawRssi,
@@ -339,25 +340,35 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
   const sensorCleanupRef = useRef<(() => void) | null>(null);
   const shakeHintTimerRef = useRef<number | null>(null);
 
-  // Viewport size, 2D/2.5D architectural tilt & interactive pan/zoom camera
+  // Viewport size, 2D/2.5D architectural tilt & ref-driven 60fps camera (zero React re-renders during pan/zoom/anim)
   const [viewportSize, setViewportSize] = useState<{ width: number; height: number }>({
     width: 960,
     height: 700,
   });
-  const [camera, setCamera] = useState<MapCamera>({
-    scale: 26,
-    panX: 80,
-    panY: 40,
+  const viewportSizeRef = useRef<{ width: number; height: number }>({
+    width: 960,
+    height: 700,
   });
   const [is25DMode, setIs25DMode] = useState(false);
   const [labelMode, setLabelMode] = useState<LabelVisibilityMode>('auto');
-  const [hoveredMarkerId, setHoveredMarkerId] = useState<string | null>(null);
+  const hoveredMarkerIdRef = useRef<string | null>(null);
   const [selectedInspectId, setSelectedInspectId] = useState<string | null>(null);
   const [isCanvasHoverInteractive, setIsCanvasHoverInteractive] = useState(false);
   const [activeClusterPopover, setActiveClusterPopover] = useState<MarkerCluster | null>(null);
   const renderedClustersRef = useRef<MarkerCluster[]>([]);
-  const cameraRef = useRef<MapCamera>(camera);
+  const cameraRef = useRef<MapCamera>({
+    scale: 26,
+    panX: 80,
+    panY: 40,
+  });
   const cameraAnimRef = useRef<number | null>(null);
+  const pulseAnimRef = useRef<number>(0);
+  const needsCanvasPaintRef = useRef<boolean>(true);
+  const staticLayerCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const staticOccupiedLabelsRef = useRef<LabelRect[]>([]);
+  const staticCacheKeyRef = useRef<string>('');
+  const visualUserPoseRef = useRef<{ x: number; y: number }>({ x: 16.0, y: 12.5 });
+  const visualPeerCoordsRef = useRef<Map<string, { x: number; y: number }>>(new Map());
   const focusHighlightRef = useRef<{
     x: number;
     y: number;
@@ -371,8 +382,9 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
   }, []);
 
   useEffect(() => {
-    cameraRef.current = camera;
-  }, [camera]);
+    viewportSizeRef.current = viewportSize;
+    needsCanvasPaintRef.current = true;
+  }, [viewportSize]);
 
   useEffect(() => {
     if (!activeClusterPopover) return;
@@ -550,7 +562,6 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
   // Motion sensors, Live Simulation & Telemetry HUD state
   const [motionSensorsActive, setMotionSensorsActive] = useState(false);
   const [sensorStatusMessage, setSensorStatusMessage] = useState<string>('Enable Motion');
-  const [pulseAnim, setPulseAnim] = useState(0);
 
   const [isSimulating, setIsSimulating] = useState(false);
   const [isTelemetryOpen, setIsTelemetryOpen] = useState(false);
@@ -727,30 +738,32 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
     }
   }, []);
 
+  const applyCamera = useCallback((nextCam: MapCamera) => {
+    cameraRef.current = nextCam;
+    needsCanvasPaintRef.current = true;
+  }, []);
+
   const animateCameraTo = useCallback(
     (targetCam: MapCamera) => {
       cancelCameraAnimation();
-      const clampedTarget = clampCameraPan(
-        targetCam,
-        viewportSize.width,
-        viewportSize.height
-      );
+      const { width: vw, height: vh } = viewportSizeRef.current;
+      const clampedTarget = clampCameraPan(targetCam, vw, vh);
       const prefersReduced =
         typeof window !== 'undefined' &&
         window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
       if (prefersReduced) {
-        setCamera(clampedTarget);
+        applyCamera(clampedTarget);
         return;
       }
 
       const startCam = { ...cameraRef.current };
       const startTime = performance.now();
-      const durationMs = 340;
+      const durationMs = 320;
 
       const step = (now: number) => {
         const t = Math.min(1, (now - startTime) / durationMs);
         const eased = 1 - Math.pow(1 - t, 3);
-        setCamera({
+        applyCamera({
           scale: startCam.scale + (clampedTarget.scale - startCam.scale) * eased,
           panX: startCam.panX + (clampedTarget.panX - startCam.panX) * eased,
           panY: startCam.panY + (clampedTarget.panY - startCam.panY) * eased,
@@ -764,7 +777,7 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
 
       cameraAnimRef.current = requestAnimationFrame(step);
     },
-    [cancelCameraAnimation, clampCameraPan, viewportSize.width, viewportSize.height]
+    [cancelCameraAnimation, clampCameraPan, applyCamera]
   );
 
   useEffect(() => {
@@ -774,9 +787,10 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
   const focusMapOnPoint = useCallback(
     (worldX: number, worldY: number, highlightColor = '#38BDF8', minScale?: number) => {
       isManualCameraRef.current = true;
+      const { width: vw, height: vh } = viewportSizeRef.current;
       const targetScale = Math.max(
         cameraRef.current.scale,
-        minScale ?? (viewportSize.width < 640 ? 24 : 30)
+        minScale ?? (vw < 640 ? 24 : 30)
       );
       focusHighlightRef.current = {
         x: worldX,
@@ -784,51 +798,56 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
         color: highlightColor,
         until: Date.now() + 1600,
       };
+      needsCanvasPaintRef.current = true;
       animateCameraTo({
         scale: targetScale,
-        panX: viewportSize.width / 2 - worldX * targetScale,
-        panY: viewportSize.height / 2 - worldY * targetScale,
+        panX: vw / 2 - worldX * targetScale,
+        panY: vh / 2 - worldY * targetScale,
       });
     },
-    [animateCameraTo, viewportSize.width, viewportSize.height]
+    [animateCameraTo]
   );
 
   const fitFloorPlan = useCallback(() => {
     isManualCameraRef.current = false;
-    animateCameraTo(computeFitCamera(viewportSize.width, viewportSize.height));
-  }, [animateCameraTo, computeFitCamera, viewportSize.width, viewportSize.height]);
+    const { width: vw, height: vh } = viewportSizeRef.current;
+    animateCameraTo(computeFitCamera(vw, vh));
+  }, [animateCameraTo, computeFitCamera]);
 
   const centerOnUser = useCallback(() => {
-    focusMapOnPoint(userPose.x, userPose.y, '#3B82F6');
-  }, [focusMapOnPoint, userPose.x, userPose.y]);
+    focusMapOnPoint(userPoseRef.current.x, userPoseRef.current.y, '#3B82F6');
+  }, [focusMapOnPoint]);
 
   const zoomBy = useCallback(
     (factor: number, focusX?: number, focusY?: number) => {
       cancelCameraAnimation();
-      const fit = computeFitCamera(viewportSize.width, viewportSize.height);
-      setCamera((prev) => {
-        const nextScale = Math.max(fit.scale, Math.min(72, prev.scale * factor));
-        if (nextScale <= fit.scale * 1.03) {
-          isManualCameraRef.current = false;
-          return fit;
-        }
-        isManualCameraRef.current = true;
-        const fx = focusX ?? viewportSize.width / 2;
-        const fy = focusY ?? viewportSize.height / 2;
-        const worldX = (fx - prev.panX) / prev.scale;
-        const worldY = (fy - prev.panY) / prev.scale;
-        return clampCameraPan(
+      const { width: vw, height: vh } = viewportSizeRef.current;
+      const fit = computeFitCamera(vw, vh);
+      const prev = cameraRef.current;
+      const nextScale = Math.max(fit.scale, Math.min(72, prev.scale * factor));
+      if (nextScale <= fit.scale * 1.03) {
+        isManualCameraRef.current = false;
+        applyCamera(fit);
+        return;
+      }
+      isManualCameraRef.current = true;
+      const fx = focusX ?? vw / 2;
+      const fy = focusY ?? vh / 2;
+      const worldX = (fx - prev.panX) / prev.scale;
+      const worldY = (fy - prev.panY) / prev.scale;
+      applyCamera(
+        clampCameraPan(
           {
             scale: nextScale,
             panX: fx - worldX * nextScale,
             panY: fy - worldY * nextScale,
           },
-          viewportSize.width,
-          viewportSize.height
-        );
-      });
+          vw,
+          vh
+        )
+      );
     },
-    [cancelCameraAnimation, viewportSize.width, viewportSize.height, computeFitCamera, clampCameraPan]
+    [cancelCameraAnimation, computeFitCamera, clampCameraPan, applyCamera]
   );
 
   // Keep map locked dead-center across viewport resizes unless user intentionally zoomed in
@@ -841,11 +860,12 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
       if (rect.width > 0 && rect.height > 0) {
         const w = Math.round(rect.width);
         const h = Math.round(rect.height);
+        viewportSizeRef.current = { width: w, height: h };
         setViewportSize({ width: w, height: h });
         if (!isManualCameraRef.current) {
-          setCamera(computeFitCamera(w, h));
+          applyCamera(computeFitCamera(w, h));
         } else {
-          setCamera((prev) => clampCameraPan(prev, w, h));
+          applyCamera(clampCameraPan(cameraRef.current, w, h));
         }
       }
     };
@@ -854,7 +874,7 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
     const observer = new ResizeObserver(updateSize);
     observer.observe(el);
     return () => observer.disconnect();
-  }, [computeFitCamera, clampCameraPan]);
+  }, [computeFitCamera, clampCameraPan, applyCamera]);
 
   // Detect Web Bluetooth availability & previously paired devices
   useEffect(() => {
@@ -904,37 +924,41 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [isMobileSheetOpen, isTelemetryOpen, isOnlineDropdownOpen, isBleModalOpen]);
 
-  // Step Forward immediately along live headingRef direction
+  // Step Forward immediately along live headingRef direction (sync ref + throttled React commit)
   const stepForward = useCallback((stepLength = 0.7) => {
-    setUserPose((prev) => {
-      const liveHeading = headingRef.current;
-      const headingRad = ((liveHeading - 90) * Math.PI) / 180;
-      const dx = Math.cos(headingRad) * stepLength;
-      const dy = Math.sin(headingRad) * stepLength;
+    const cur = userPoseRef.current;
+    const liveHeading = headingRef.current;
+    const roundedHeading = Math.round(liveHeading);
+    const headingRad = ((liveHeading - 90) * Math.PI) / 180;
+    const dx = Math.cos(headingRad) * stepLength;
+    const dy = Math.sin(headingRad) * stepLength;
 
-      const resolved = resolveWallCollision(prev.x, prev.y, dx, dy);
-      const actualMoved = Math.hypot(resolved.x - prev.x, resolved.y - prev.y);
+    const resolved = resolveWallCollision(cur.x, cur.y, dx, dy);
+    const actualMoved = Math.hypot(resolved.x - cur.x, resolved.y - cur.y);
 
-      if (resolved.hitWall) {
-        wallHitUntilRef.current = Date.now() + 450;
-      }
+    if (resolved.hitWall) {
+      wallHitUntilRef.current = Date.now() + 450;
+    }
 
-      if (actualMoved < 0.03) {
-        return {
-          ...prev,
-          heading: Math.round(liveHeading),
-        };
-      }
+    if (actualMoved < 0.03) {
+      userPoseRef.current = { ...cur, heading: roundedHeading };
+      needsCanvasPaintRef.current = true;
+      setUserPose((prev) => (prev.heading === roundedHeading ? prev : { ...prev, heading: roundedHeading }));
+      return;
+    }
 
-      return {
-        ...prev,
-        x: resolved.x,
-        y: resolved.y,
-        heading: Math.round(liveHeading),
-        stepCount: prev.stepCount + 1,
-        totalDistanceMeters: Number((prev.totalDistanceMeters + actualMoved).toFixed(1)),
-      };
-    });
+    const nextPose: UserPose = {
+      ...cur,
+      x: resolved.x,
+      y: resolved.y,
+      heading: roundedHeading,
+      stepCount: cur.stepCount + 1,
+      totalDistanceMeters: Number((cur.totalDistanceMeters + actualMoved).toFixed(1)),
+    };
+    userPoseRef.current = nextPose;
+    needsCanvasPaintRef.current = true;
+    presenceClientRef.current?.updateLocalState({ x: nextPose.x, y: nextPose.y });
+    setUserPose(nextPose);
   }, []);
 
   const displayedDemoBots = useMemo(
@@ -1061,20 +1085,22 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
 
   const hasArrived = Boolean(activeTarget && liveDirectDistance < 1.4);
 
+  // Single-source Dijkstra distance field (~0.3ms total for ALL live users, demo bots & rooms)
   const walkableDistancesById = useMemo(() => {
     const map = new Map<string, number>();
     const origin = { x: userPose.x, y: userPose.y };
-    for (const lu of liveUsers) {
-      const res = findWallFreePath(origin, { x: lu.x, y: lu.y });
-      map.set(lu.id, res ? res.totalDistance : Math.hypot(lu.x - origin.x, lu.y - origin.y));
+    const field = computeDistanceFieldFromOrigin(origin);
+    for (let i = 0; i < liveUsers.length; i++) {
+      const lu = liveUsers[i];
+      map.set(lu.id, lookupWalkableDistance(field, { x: lu.x, y: lu.y }));
     }
-    for (const peer of displayedDemoBots) {
-      const res = findWallFreePath(origin, { x: peer.x, y: peer.y });
-      map.set(peer.id, res ? res.totalDistance : Math.hypot(peer.x - origin.x, peer.y - origin.y));
+    for (let i = 0; i < displayedDemoBots.length; i++) {
+      const peer = displayedDemoBots[i];
+      map.set(peer.id, lookupWalkableDistance(field, { x: peer.x, y: peer.y }));
     }
-    for (const room of roomDestinations) {
-      const res = findWallFreePath(origin, { x: room.x, y: room.y });
-      map.set(room.id, res ? res.totalDistance : Math.hypot(room.x - origin.x, room.y - origin.y));
+    for (let i = 0; i < roomDestinations.length; i++) {
+      const room = roomDestinations[i];
+      map.set(room.id, lookupWalkableDistance(field, { x: room.x, y: room.y }));
     }
     return map;
   }, [userPose.x, userPose.y, liveUsers, displayedDemoBots, roomDestinations]);
@@ -1515,15 +1541,17 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
       }
 
       if (addedMeters > 0 || addedSteps > 0 || nextHeading !== curPose.heading) {
-        setUserPose((prev) => ({
-          ...prev,
+        const nextPose: UserPose = {
+          ...curPose,
           x: nextX,
           y: nextY,
           heading: nextHeading,
-          stepCount: prev.stepCount + addedSteps,
-          totalDistanceMeters: Number((prev.totalDistanceMeters + addedMeters).toFixed(1)),
+          stepCount: curPose.stepCount + addedSteps,
+          totalDistanceMeters: Number((curPose.totalDistanceMeters + addedMeters).toFixed(1)),
           accuracy: 0.75,
-        }));
+        };
+        userPoseRef.current = nextPose;
+        setUserPose(nextPose);
       }
 
       // Generate synthetic BLE RSSI with Gaussian noise & pass through 1D Kalman Filter
@@ -1583,27 +1611,20 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
     return () => window.clearInterval(timer);
   }, [isSimulating]);
 
+  // Demo bots ambient idle motion (paused automatically when demo bots are hidden)
   useEffect(() => {
-    let frame: number;
-    const tick = () => {
-      setPulseAnim((prev) => (prev + 0.016) % 1);
-      frame = requestAnimationFrame(tick);
-    };
-    frame = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(frame);
-  }, []);
-
-  useEffect(() => {
-    const interval = setInterval(() => {
+    if (!showDemoBots) return;
+    const bases = [
+      { x: 26.0, y: 20.0 },
+      { x: 6.0, y: 5.0 },
+      { x: 26.0, y: 5.0 },
+      { x: 6.0, y: 20.0 },
+    ];
+    const interval = window.setInterval(() => {
+      const now = Date.now();
       setPeers((prev) =>
         prev.map((peer, idx) => {
-          const angle = Date.now() / 1400 + idx * 1.5;
-          const bases = [
-            { x: 26.0, y: 20.0 },
-            { x: 6.0, y: 5.0 },
-            { x: 26.0, y: 5.0 },
-            { x: 6.0, y: 20.0 },
-          ];
+          const angle = now / 1400 + idx * 1.5;
           const b = bases[idx] || { x: peer.x, y: peer.y };
           return {
             ...peer,
@@ -1613,9 +1634,9 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
           };
         })
       );
-    }, 700);
-    return () => clearInterval(interval);
-  }, []);
+    }, 850);
+    return () => window.clearInterval(interval);
+  }, [showDemoBots]);
 
   const handleOrientation = useCallback((e: DeviceOrientationEvent) => {
     const compass = (e as unknown as { webkitCompassHeading?: number }).webkitCompassHeading;
@@ -1637,14 +1658,18 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
     const calibrated = (rawHeading - headingOffsetRef.current + 360) % 360;
     const smoothed = smoothHeadingDegrees(headingRef.current, calibrated, 0.48);
     headingRef.current = smoothed;
+    // Repaint heading cone on canvas immediately at full sensor rate with zero React overhead
+    needsCanvasPaintRef.current = true;
 
-    const now = Date.now();
-    if (now - lastHeadingSyncRef.current >= 40) {
+    const now = performance.now();
+    if (now - lastHeadingSyncRef.current >= 140) {
       lastHeadingSyncRef.current = now;
       const rounded = Math.round(smoothed);
-      setUserPose((prev) =>
-        Math.abs(prev.heading - rounded) >= 2 ? { ...prev, heading: rounded } : prev
-      );
+      setUserPose((prev) => {
+        let diff = Math.abs(prev.heading - rounded);
+        if (diff > 180) diff = 360 - diff;
+        return diff >= 4 ? { ...prev, heading: rounded } : prev;
+      });
     }
   }, []);
 
@@ -1668,13 +1693,13 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
         rotAlpha: e.rotationRate?.alpha ?? null,
         rotBeta: e.rotationRate?.beta ?? null,
         rotGamma: e.rotationRate?.gamma ?? null,
-        timestampMs: Date.now(),
+        timestampMs: performance.now(),
       });
 
       if (result.stepDetected) {
         stepForward(result.stepLengthMeters);
       } else if (result.shakeRejected) {
-        setSensorStatusMessage('Shake Ignored');
+        setSensorStatusMessage((cur) => (cur === 'Shake Ignored' ? cur : 'Shake Ignored'));
         if (shakeHintTimerRef.current) {
           window.clearTimeout(shakeHintTimerRef.current);
         }
@@ -1807,564 +1832,698 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
     };
   }, [attachMotionListeners]);
 
-  // Full-Viewport HiDPI Enterprise Spatial Map Painter
+  const canvasStateRef = useRef({
+    is25DMode,
+    labelMode,
+    selectedInspectId,
+    activeClusterPopover,
+    activeRoute,
+    displayedDemoBots,
+    liveUsers,
+    presenceProfile,
+    avatarUrl: currentUser.avatarUrl,
+    targetPeerId,
+    targetLiveUserId,
+    targetRoomId,
+    activeTarget,
+    isSimulating,
+    isTelemetryOpen,
+    beacons,
+    rawTrilatPose,
+    kalmanTrilatPose,
+  });
+
+  canvasStateRef.current = {
+    is25DMode,
+    labelMode,
+    selectedInspectId,
+    activeClusterPopover,
+    activeRoute,
+    displayedDemoBots,
+    liveUsers,
+    presenceProfile,
+    avatarUrl: currentUser.avatarUrl,
+    targetPeerId,
+    targetLiveUserId,
+    targetRoomId,
+    activeTarget,
+    isSimulating,
+    isTelemetryOpen,
+    beacons,
+    rawTrilatPose,
+    kalmanTrilatPose,
+  };
+
   useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
+    needsCanvasPaintRef.current = true;
+  }, [
+    viewportSize,
+    is25DMode,
+    labelMode,
+    selectedInspectId,
+    activeClusterPopover,
+    userPose,
+    activeRoute,
+    displayedDemoBots,
+    liveUsers,
+    presenceProfile,
+    currentUser.avatarUrl,
+    avatarLoadTick,
+    targetPeerId,
+    targetLiveUserId,
+    targetRoomId,
+    activeTarget,
+    isSimulating,
+    isTelemetryOpen,
+    beacons,
+    rawTrilatPose,
+    kalmanTrilatPose,
+  ]);
 
-    const { width: viewW, height: viewH } = viewportSize;
-    if (viewW <= 0 || viewH <= 0) return;
+  // Persistent 60fps Ref-Driven Canvas Engine + Offscreen Static Architectural Blueprint Cache
+  useEffect(() => {
+    let rafId = 0;
 
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    const backingW = Math.round(viewW * dpr);
-    const backingH = Math.round(viewH * dpr);
-    if (canvas.width !== backingW || canvas.height !== backingH) {
-      canvas.width = backingW;
-      canvas.height = backingH;
-    }
-
-    ctx.save();
-    ctx.scale(dpr, dpr);
-
-    // 1. Transparent Canvas Stage over Full-Bleed Engineering Coordinate Grid
-    ctx.clearRect(0, 0, viewW, viewH);
-
-    const { scale, panX, panY } = camera;
-    const wx = (mx: number) => panX + mx * scale;
-    const wy = (my: number) => panY + my * scale;
-    const labelYScale = is25DMode ? 1.132 : 1;
-
-    const bx = wx(WORLD_BOUNDS.minX);
-    const by = wy(WORLD_BOUNDS.minY);
-    const bw = WORLD_BOUNDS.width * scale;
-    const bh = WORLD_BOUNDS.height * scale;
-
-    // Subtle building architectural floor elevation shadow
-    ctx.save();
-    ctx.shadowColor = 'rgba(0, 0, 0, 0.72)';
-    ctx.shadowBlur = is25DMode ? 48 : 36;
-    ctx.shadowOffsetY = is25DMode ? 22 : 12;
-    ctx.fillStyle = '#0B111C';
-    ctx.beginPath();
-    ctx.roundRect(bx, by, bw, bh, 4);
-    ctx.fill();
-    ctx.restore();
-
-    // Track occupied label boxes so markers & room titles never collide
-    const occupiedLabels: LabelRect[] = [];
-
-    // Helper: Draw tiny vector micro-icon badge for each functional room zone
-    const drawRoomMicroIcon = (roomId: string, cx: number, cy: number, color: string) => {
-      ctx.save();
-      ctx.translate(cx, cy);
-      ctx.scale(1, labelYScale);
-      ctx.strokeStyle = color;
-      ctx.fillStyle = color;
-      ctx.lineWidth = 1.25;
-      ctx.lineCap = 'round';
-      ctx.lineJoin = 'round';
-
-      if (roomId === 'room_101') {
-        // Lab 101: Precision conical flask
-        ctx.beginPath();
-        ctx.moveTo(-2, -4.5);
-        ctx.lineTo(2, -4.5);
-        ctx.moveTo(-1.3, -4.5);
-        ctx.lineTo(-1.3, -1.5);
-        ctx.lineTo(-4.2, 3.8);
-        ctx.lineTo(4.2, 3.8);
-        ctx.lineTo(1.3, -1.5);
-        ctx.lineTo(1.3, -4.5);
-        ctx.stroke();
-      } else if (roomId === 'room_105') {
-        // Server Hub: Dual rack blades + LED dot
-        ctx.strokeRect(-4.5, -4, 9, 3.2);
-        ctx.strokeRect(-4.5, 0.8, 9, 3.2);
-        ctx.fillRect(-3, -2.8, 1.4, 1);
-        ctx.fillRect(-3, 2, 1.4, 1);
-      } else if (roomId === 'room_102') {
-        // Conference Room A: Presentation board
-        ctx.strokeRect(-4.5, -4, 9, 5.6);
-        ctx.beginPath();
-        ctx.moveTo(0, 1.6);
-        ctx.lineTo(0, 4.2);
-        ctx.moveTo(-2.5, 4.2);
-        ctx.lineTo(2.5, 4.2);
-        ctx.stroke();
-      } else if (roomId === 'room_103') {
-        // Cafeteria: Coffee cup + handle
-        ctx.beginPath();
-        ctx.roundRect(-4.2, -1.8, 6.4, 5.6, 1.4);
-        ctx.stroke();
-        ctx.beginPath();
-        ctx.arc(2.2, 0.8, 1.8, -Math.PI / 2, Math.PI / 2);
-        ctx.stroke();
-      } else if (roomId === 'room_104') {
-        // Executive Suite: Briefcase / shield
-        ctx.strokeRect(-4.5, -2.2, 9, 6);
-        ctx.beginPath();
-        ctx.moveTo(-2, -2.2);
-        ctx.lineTo(-2, -4);
-        ctx.lineTo(2, -4);
-        ctx.lineTo(2, -2.2);
-        ctx.stroke();
+    const ensureStaticLayer = (
+      viewW: number,
+      viewH: number,
+      dpr: number,
+      scale: number,
+      panX: number,
+      panY: number,
+      is25D: boolean,
+      activeRoomId: string | null
+    ): { canvas: HTMLCanvasElement; occupiedRoomLabels: LabelRect[] } => {
+      const cacheKey = `${viewW}|${viewH}|${dpr}|${scale.toFixed(3)}|${panX.toFixed(2)}|${panY.toFixed(2)}|${is25D ? 1 : 0}|${activeRoomId ?? ''}`;
+      if (staticLayerCanvasRef.current && staticCacheKeyRef.current === cacheKey) {
+        return {
+          canvas: staticLayerCanvasRef.current,
+          occupiedRoomLabels: staticOccupiedLabelsRef.current,
+        };
       }
-      ctx.restore();
-    };
 
-    // 2. Walkable Corridors & Main Concourse Pavement
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(bx, by, bw, bh);
-    ctx.clip();
+      if (!staticLayerCanvasRef.current) {
+        staticLayerCanvasRef.current = document.createElement('canvas');
+      }
+      const offCanvas = staticLayerCanvasRef.current;
+      const backingW = Math.round(viewW * dpr);
+      const backingH = Math.round(viewH * dpr);
+      if (offCanvas.width !== backingW || offCanvas.height !== backingH) {
+        offCanvas.width = backingW;
+        offCanvas.height = backingH;
+      }
 
-    // Lit architectural terrazzo corridor floor
-    ctx.fillStyle = '#182235';
-    ctx.fillRect(bx, by, bw, bh);
+      const octx = offCanvas.getContext('2d');
+      const occupiedLabels: LabelRect[] = [];
+      if (!octx) {
+        staticCacheKeyRef.current = cacheKey;
+        staticOccupiedLabelsRef.current = occupiedLabels;
+        return { canvas: offCanvas, occupiedRoomLabels: occupiedLabels };
+      }
 
-    // Subtle 2m x 2m architectural slab grid across walkable corridors
-    ctx.strokeStyle = 'rgba(148, 163, 184, 0.06)';
-    ctx.lineWidth = 1;
-    for (let mx = WORLD_BOUNDS.minX; mx <= WORLD_BOUNDS.maxX; mx += 2) {
-      const px = wx(mx);
-      ctx.beginPath();
-      ctx.moveTo(px, by);
-      ctx.lineTo(px, by + bh);
-      ctx.stroke();
-    }
-    for (let my = WORLD_BOUNDS.minY; my <= WORLD_BOUNDS.maxY; my += 2) {
-      const py = wy(my);
-      ctx.beginPath();
-      ctx.moveTo(bx, py);
-      ctx.lineTo(bx + bw, py);
-      ctx.stroke();
-    }
+      octx.save();
+      octx.scale(dpr, dpr);
+      octx.clearRect(0, 0, viewW, viewH);
 
-    // Subtle corridor circulation centerline guides
-    ctx.strokeStyle = 'rgba(148, 163, 184, 0.13)';
-    ctx.lineWidth = Math.max(1, scale * 0.04);
-    ctx.setLineDash([6, 8]);
-    ctx.beginPath();
-    ctx.moveTo(wx(2.0), wy(12.5));
-    ctx.lineTo(wx(13.0), wy(12.5));
-    ctx.moveTo(wx(19.0), wy(12.5));
-    ctx.lineTo(wx(30.0), wy(12.5));
-    ctx.moveTo(wx(16.0), wy(4.8));
-    ctx.lineTo(wx(16.0), wy(10.0));
-    ctx.moveTo(wx(16.0), wy(15.0));
-    ctx.lineTo(wx(16.0), wy(23.0));
-    ctx.stroke();
-    ctx.setLineDash([]);
+      const wx = (mx: number) => panX + mx * scale;
+      const wy = (my: number) => panY + my * scale;
+      const labelYScale = is25D ? 1.132 : 1;
 
-    // Corridor & Lobby Architectural Zone Labels
-    if (scale >= 11) {
-      const hallFont = Math.max(8, Math.min(10.5, scale * 0.31));
-      ctx.fillStyle = 'rgba(148, 163, 184, 0.44)';
-      ctx.font = `600 ${hallFont}px "JetBrains Mono", monospace`;
-      ctx.textAlign = 'center';
-      const drawHallLabel = (text: string, mx: number, my: number) => {
-        ctx.save();
-        ctx.translate(wx(mx), wy(my));
-        ctx.scale(1, labelYScale);
-        ctx.fillText(text, 0, 0);
-        ctx.restore();
+      const bx = wx(WORLD_BOUNDS.minX);
+      const by = wy(WORLD_BOUNDS.minY);
+      const bw = WORLD_BOUNDS.width * scale;
+      const bh = WORLD_BOUNDS.height * scale;
+
+      // Subtle building architectural floor elevation shadow (cached once per camera change)
+      octx.save();
+      octx.shadowColor = 'rgba(0, 0, 0, 0.72)';
+      octx.shadowBlur = is25D ? 48 : 36;
+      octx.shadowOffsetY = is25D ? 22 : 12;
+      octx.fillStyle = '#0B111C';
+      octx.beginPath();
+      octx.roundRect(bx, by, bw, bh, 4);
+      octx.fill();
+      octx.restore();
+
+      const drawRoomMicroIcon = (roomId: string, cx: number, cy: number, color: string) => {
+        octx.save();
+        octx.translate(cx, cy);
+        octx.scale(1, labelYScale);
+        octx.strokeStyle = color;
+        octx.fillStyle = color;
+        octx.lineWidth = 1.25;
+        octx.lineCap = 'round';
+        octx.lineJoin = 'round';
+
+        if (roomId === 'room_101') {
+          octx.beginPath();
+          octx.moveTo(-2, -4.5);
+          octx.lineTo(2, -4.5);
+          octx.moveTo(-1.3, -4.5);
+          octx.lineTo(-1.3, -1.5);
+          octx.lineTo(-4.2, 3.8);
+          octx.lineTo(4.2, 3.8);
+          octx.lineTo(1.3, -1.5);
+          octx.lineTo(1.3, -4.5);
+          octx.stroke();
+        } else if (roomId === 'room_105') {
+          octx.strokeRect(-4.5, -4, 9, 3.2);
+          octx.strokeRect(-4.5, 0.8, 9, 3.2);
+          octx.fillRect(-3, -2.8, 1.4, 1);
+          octx.fillRect(-3, 2, 1.4, 1);
+        } else if (roomId === 'room_102') {
+          octx.strokeRect(-4.5, -4, 9, 5.6);
+          octx.beginPath();
+          octx.moveTo(0, 1.6);
+          octx.lineTo(0, 4.2);
+          octx.moveTo(-2.5, 4.2);
+          octx.lineTo(2.5, 4.2);
+          octx.stroke();
+        } else if (roomId === 'room_103') {
+          octx.beginPath();
+          octx.roundRect(-4.2, -1.8, 6.4, 5.6, 1.4);
+          octx.stroke();
+          octx.beginPath();
+          octx.arc(2.2, 0.8, 1.8, -Math.PI / 2, Math.PI / 2);
+          octx.stroke();
+        } else if (roomId === 'room_104') {
+          octx.strokeRect(-4.5, -2.2, 9, 6);
+          octx.beginPath();
+          octx.moveTo(-2, -2.2);
+          octx.lineTo(-2, -4);
+          octx.lineTo(2, -4);
+          octx.lineTo(2, -2.2);
+          octx.stroke();
+        }
+        octx.restore();
       };
-      drawHallLabel('NORTH CORRIDOR', 16.0, 7.1);
-      drawHallLabel('SOUTH LOBBY', 16.0, 21.8);
-      drawHallLabel('WEST CONCOURSE', 7.0, 14.3);
-      drawHallLabel('EAST CONCOURSE', 25.0, 14.3);
-      ctx.textAlign = 'left';
-    }
 
-    // 3. Enclosed Rooms, Distinct Functional Ambient Tints, CAD Fixtures & Micro-Icon Badges
-    const ROOM_ACCENTS: Record<string, { fill: string; badgeBg: string; stroke: string }> = {
-      room_101: {
-        fill: 'rgba(14, 165, 233, 0.085)',
-        badgeBg: 'rgba(56, 189, 248, 0.14)',
-        stroke: '#38BDF8',
-      },
-      room_105: {
-        fill: 'rgba(16, 185, 129, 0.085)',
-        badgeBg: 'rgba(52, 211, 153, 0.14)',
-        stroke: '#34D399',
-      },
-      room_102: {
-        fill: 'rgba(139, 92, 246, 0.08)',
-        badgeBg: 'rgba(167, 139, 250, 0.14)',
-        stroke: '#A78BFA',
-      },
-      room_103: {
-        fill: 'rgba(245, 158, 11, 0.08)',
-        badgeBg: 'rgba(251, 191, 36, 0.14)',
-        stroke: '#FBBF24',
-      },
-      room_104: {
-        fill: 'rgba(234, 179, 8, 0.065)',
-        badgeBg: 'rgba(250, 204, 21, 0.12)',
-        stroke: '#FACC15',
-      },
-    };
+      // 2. Walkable Corridors & Main Concourse Pavement
+      octx.save();
+      octx.beginPath();
+      octx.rect(bx, by, bw, bh);
+      octx.clip();
 
-    FLOOR_ROOMS.forEach((r) => {
-      const rx = wx(r.x);
-      const ry = wy(r.y);
-      const rw = r.w * scale;
-      const rh = r.h * scale;
-      const isRoomTarget = targetRoomId === r.id;
-      const isAtrium = r.id === 'corr_center';
+      octx.fillStyle = '#182235';
+      octx.fillRect(bx, by, bw, bh);
 
-      // Base room slab
-      ctx.fillStyle = isAtrium ? '#152136' : '#0F1624';
-      ctx.fillRect(rx, ry, rw, rh);
-
-      // Subtle ambient zone micro-tint
-      const accent = ROOM_ACCENTS[r.id];
-      if (isRoomTarget) {
-        ctx.fillStyle = 'rgba(56, 189, 248, 0.15)';
-        ctx.fillRect(rx, ry, rw, rh);
-      } else if (accent) {
-        ctx.fillStyle = accent.fill;
-        ctx.fillRect(rx, ry, rw, rh);
+      octx.strokeStyle = 'rgba(148, 163, 184, 0.06)';
+      octx.lineWidth = 1;
+      for (let mx = WORLD_BOUNDS.minX; mx <= WORLD_BOUNDS.maxX; mx += 2) {
+        const px = wx(mx);
+        octx.beginPath();
+        octx.moveTo(px, by);
+        octx.lineTo(px, by + bh);
+        octx.stroke();
+      }
+      for (let my = WORLD_BOUNDS.minY; my <= WORLD_BOUNDS.maxY; my += 2) {
+        const py = wy(my);
+        octx.beginPath();
+        octx.moveTo(bx, py);
+        octx.lineTo(bx + bw, py);
+        octx.stroke();
       }
 
-      // Atrium skylight glow + concentric floor tile rings + subtle BLE signal waves
-      if (isAtrium) {
-        const atriumGlow = ctx.createRadialGradient(
-          wx(16.0),
-          wy(12.5),
-          0,
-          wx(16.0),
-          wy(12.5),
-          Math.max(rw, rh) * 0.62
-        );
-        atriumGlow.addColorStop(0, 'rgba(56, 189, 248, 0.13)');
-        atriumGlow.addColorStop(1, 'rgba(56, 189, 248, 0)');
-        ctx.fillStyle = atriumGlow;
-        ctx.fillRect(rx, ry, rw, rh);
+      octx.strokeStyle = 'rgba(148, 163, 184, 0.13)';
+      octx.lineWidth = Math.max(1, scale * 0.04);
+      octx.setLineDash([6, 8]);
+      octx.beginPath();
+      octx.moveTo(wx(2.0), wy(12.5));
+      octx.lineTo(wx(13.0), wy(12.5));
+      octx.moveTo(wx(19.0), wy(12.5));
+      octx.lineTo(wx(30.0), wy(12.5));
+      octx.moveTo(wx(16.0), wy(4.8));
+      octx.lineTo(wx(16.0), wy(10.0));
+      octx.moveTo(wx(16.0), wy(15.0));
+      octx.lineTo(wx(16.0), wy(23.0));
+      octx.stroke();
+      octx.setLineDash([]);
+
+      if (scale >= 11) {
+        const hallFont = Math.max(8, Math.min(10.5, scale * 0.31));
+        octx.fillStyle = 'rgba(148, 163, 184, 0.44)';
+        octx.font = `600 ${hallFont}px "JetBrains Mono", monospace`;
+        octx.textAlign = 'center';
+        const drawHallLabel = (text: string, mx: number, my: number) => {
+          octx.save();
+          octx.translate(wx(mx), wy(my));
+          octx.scale(1, labelYScale);
+          octx.fillText(text, 0, 0);
+          octx.restore();
+        };
+        drawHallLabel('NORTH CORRIDOR', 16.0, 7.1);
+        drawHallLabel('SOUTH LOBBY', 16.0, 21.8);
+        drawHallLabel('WEST CONCOURSE', 7.0, 14.3);
+        drawHallLabel('EAST CONCOURSE', 25.0, 14.3);
+        octx.textAlign = 'left';
       }
 
-      // Subtle architectural room furniture & structural inlays
-      ctx.strokeStyle = 'rgba(148, 163, 184, 0.15)';
-      ctx.fillStyle = 'rgba(148, 163, 184, 0.045)';
-      ctx.lineWidth = Math.max(1, scale * 0.04);
+      // 3. Enclosed Rooms, Distinct Functional Ambient Tints, CAD Fixtures & Micro-Icon Badges
+      const ROOM_ACCENTS: Record<string, { fill: string; badgeBg: string; stroke: string }> = {
+        room_101: {
+          fill: 'rgba(14, 165, 233, 0.085)',
+          badgeBg: 'rgba(56, 189, 248, 0.14)',
+          stroke: '#38BDF8',
+        },
+        room_105: {
+          fill: 'rgba(16, 185, 129, 0.085)',
+          badgeBg: 'rgba(52, 211, 153, 0.14)',
+          stroke: '#34D399',
+        },
+        room_102: {
+          fill: 'rgba(139, 92, 246, 0.08)',
+          badgeBg: 'rgba(167, 139, 250, 0.14)',
+          stroke: '#A78BFA',
+        },
+        room_103: {
+          fill: 'rgba(245, 158, 11, 0.08)',
+          badgeBg: 'rgba(251, 191, 36, 0.14)',
+          stroke: '#FBBF24',
+        },
+        room_104: {
+          fill: 'rgba(234, 179, 8, 0.065)',
+          badgeBg: 'rgba(250, 204, 21, 0.12)',
+          stroke: '#FACC15',
+        },
+      };
 
-      if (r.id === 'room_101') {
-        ctx.fillRect(wx(2.0), wy(3.3), 2.3 * scale, 1.05 * scale);
-        ctx.strokeRect(wx(2.0), wy(3.3), 2.3 * scale, 1.05 * scale);
-        ctx.fillRect(wx(2.0), wy(5.7), 2.3 * scale, 1.05 * scale);
-        ctx.strokeRect(wx(2.0), wy(5.7), 2.3 * scale, 1.05 * scale);
-        ctx.fillRect(wx(8.2), wy(1.7), 2.0 * scale, 1.15 * scale);
-        ctx.strokeRect(wx(8.2), wy(1.7), 2.0 * scale, 1.15 * scale);
-      } else if (r.id === 'room_102') {
-        ctx.beginPath();
-        ctx.roundRect(wx(24.0), wy(6.1), 4.6 * scale, 1.55 * scale, 0.72 * scale);
-        ctx.fill();
-        ctx.stroke();
-        for (let cx = 24.7; cx <= 28.0; cx += 1.1) {
-          ctx.beginPath();
-          ctx.arc(wx(cx), wy(5.85), 0.16 * scale, 0, Math.PI * 2);
-          ctx.arc(wx(cx), wy(7.9), 0.16 * scale, 0, Math.PI * 2);
-          ctx.stroke();
+      FLOOR_ROOMS.forEach((r) => {
+        const rx = wx(r.x);
+        const ry = wy(r.y);
+        const rw = r.w * scale;
+        const rh = r.h * scale;
+        const isRoomTarget = activeRoomId === r.id;
+        const isAtrium = r.id === 'corr_center';
+
+        octx.fillStyle = isAtrium ? '#152136' : '#0F1624';
+        octx.fillRect(rx, ry, rw, rh);
+
+        const accent = ROOM_ACCENTS[r.id];
+        if (isRoomTarget) {
+          octx.fillStyle = 'rgba(56, 189, 248, 0.15)';
+          octx.fillRect(rx, ry, rw, rh);
+        } else if (accent) {
+          octx.fillStyle = accent.fill;
+          octx.fillRect(rx, ry, rw, rh);
         }
-      } else if (r.id === 'room_105') {
-        for (const sx of [13.9, 15.5, 17.1]) {
-          ctx.fillRect(wx(sx), wy(1.35), 1.0 * scale, 0.58 * scale);
-          ctx.strokeRect(wx(sx), wy(1.35), 1.0 * scale, 0.58 * scale);
-          if (scale >= 14) {
-            ctx.fillStyle = 'rgba(52, 211, 153, 0.7)';
-            ctx.fillRect(wx(sx + 0.18), wy(1.56), 0.15 * scale, 0.15 * scale);
-            ctx.fillStyle = 'rgba(148, 163, 184, 0.045)';
+
+        if (isAtrium) {
+          const atriumGlow = octx.createRadialGradient(
+            wx(16.0),
+            wy(12.5),
+            0,
+            wx(16.0),
+            wy(12.5),
+            Math.max(rw, rh) * 0.62
+          );
+          atriumGlow.addColorStop(0, 'rgba(56, 189, 248, 0.13)');
+          atriumGlow.addColorStop(1, 'rgba(56, 189, 248, 0)');
+          octx.fillStyle = atriumGlow;
+          octx.fillRect(rx, ry, rw, rh);
+        }
+
+        octx.strokeStyle = 'rgba(148, 163, 184, 0.15)';
+        octx.fillStyle = 'rgba(148, 163, 184, 0.045)';
+        octx.lineWidth = Math.max(1, scale * 0.04);
+
+        if (r.id === 'room_101') {
+          octx.fillRect(wx(2.0), wy(3.3), 2.3 * scale, 1.05 * scale);
+          octx.strokeRect(wx(2.0), wy(3.3), 2.3 * scale, 1.05 * scale);
+          octx.fillRect(wx(2.0), wy(5.7), 2.3 * scale, 1.05 * scale);
+          octx.strokeRect(wx(2.0), wy(5.7), 2.3 * scale, 1.05 * scale);
+          octx.fillRect(wx(8.2), wy(1.7), 2.0 * scale, 1.15 * scale);
+          octx.strokeRect(wx(8.2), wy(1.7), 2.0 * scale, 1.15 * scale);
+        } else if (r.id === 'room_102') {
+          octx.beginPath();
+          octx.roundRect(wx(24.0), wy(6.1), 4.6 * scale, 1.55 * scale, 0.72 * scale);
+          octx.fill();
+          octx.stroke();
+          for (let cx = 24.7; cx <= 28.0; cx += 1.1) {
+            octx.beginPath();
+            octx.arc(wx(cx), wy(5.85), 0.16 * scale, 0, Math.PI * 2);
+            octx.arc(wx(cx), wy(7.9), 0.16 * scale, 0, Math.PI * 2);
+            octx.stroke();
           }
-        }
-      } else if (r.id === 'room_103') {
-        for (const [tx, ty] of [
-          [2.7, 19.0],
-          [2.7, 22.0],
-          [8.4, 22.1],
-        ]) {
-          ctx.beginPath();
-          ctx.arc(wx(tx), wy(ty), 0.66 * scale, 0, Math.PI * 2);
-          ctx.fill();
-          ctx.stroke();
-        }
-      } else if (r.id === 'room_104') {
-        ctx.fillRect(wx(28.5), wy(18.2), 1.5 * scale, 4.0 * scale);
-        ctx.strokeRect(wx(28.5), wy(18.2), 1.5 * scale, 4.0 * scale);
-        ctx.beginPath();
-        ctx.arc(wx(23.3), wy(22.1), 0.62 * scale, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.stroke();
-      } else if (isAtrium) {
-        // Concentric architectural tile rings + subtle center BLE signal wave rings
-        ctx.strokeStyle = 'rgba(148, 163, 184, 0.16)';
-        ctx.beginPath();
-        ctx.arc(wx(16.0), wy(12.5), 2.15 * scale, 0, Math.PI * 2);
-        ctx.stroke();
-        ctx.beginPath();
-        ctx.arc(wx(16.0), wy(12.5), 1.35 * scale, 0, Math.PI * 2);
-        ctx.stroke();
-
-        ctx.strokeStyle = `rgba(56, 189, 248, ${0.24 * (1 - pulseAnim)})`;
-        ctx.lineWidth = 1.25;
-        ctx.beginPath();
-        ctx.arc(wx(16.0), wy(12.5), (0.9 + pulseAnim * 1.45) * scale, 0, Math.PI * 2);
-        ctx.stroke();
-
-        for (const [colX, colY] of [
-          [13.45, 10.45],
-          [18.25, 10.45],
-          [13.45, 14.25],
-          [18.25, 14.25],
-        ]) {
-          ctx.fillStyle = 'rgba(148, 163, 184, 0.32)';
-          ctx.fillRect(wx(colX), wy(colY), 0.3 * scale, 0.3 * scale);
-        }
-      }
-
-      if (isRoomTarget) {
-        ctx.strokeStyle = 'rgba(56, 189, 248, 0.65)';
-        ctx.lineWidth = 1.8;
-        ctx.strokeRect(rx + 1, ry + 1, rw - 2, rh - 2);
-      }
-
-      // Zero-Clip Room Typography + Micro-Icon Badge
-      const labelPadX = Math.max(7, scale * 0.42);
-      const showIconBadge = !isAtrium && scale >= 15 && rw >= 95;
-      const badgeSize = showIconBadge ? 18 : 0;
-      const badgeGap = showIconBadge ? 7 : 0;
-      const textStartX = rx + labelPadX + badgeSize + badgeGap;
-      const maxLabelW = Math.max(24, rw - labelPadX * 2 - badgeSize - badgeGap);
-      const baseLabelFont = Math.max(9.5, Math.min(13, scale * 0.41));
-      const codeFontSize = Math.max(8, Math.min(10, scale * 0.3));
-
-      if (isAtrium) {
-        const atriumFont = Math.max(8, Math.min(10, scale * 0.31));
-        ctx.font = `700 ${atriumFont}px "JetBrains Mono", monospace`;
-        const atriumTitle = 'CENTRAL ATRIUM';
-        const tw = ctx.measureText(atriumTitle).width;
-        const tx = rx + rw / 2;
-        const ty = ry + Math.max(13, scale * 0.54);
-        ctx.fillStyle = 'rgba(148, 163, 184, 0.78)';
-        ctx.textAlign = 'center';
-        ctx.save();
-        ctx.translate(tx, ty);
-        ctx.scale(1, labelYScale);
-        ctx.fillText(atriumTitle, 0, 0, maxLabelW);
-        ctx.restore();
-        ctx.textAlign = 'left';
-        occupiedLabels.push({
-          x: tx - Math.min(tw, maxLabelW) / 2 - 2,
-          y: ty - atriumFont,
-          w: Math.min(tw, maxLabelW) + 4,
-          h: atriumFont + 4,
-        });
-      } else {
-        const labelPadY =
-          r.id === 'room_105'
-            ? Math.max(24, scale * 1.38)
-            : Math.max(16, scale * 0.8);
-        ctx.font = `600 ${baseLabelFont}px "Plus Jakarta Sans", system-ui, sans-serif`;
-
-        let lines: string[] = [r.name];
-        let actualFont = baseLabelFont;
-        const measuredFull = ctx.measureText(r.name).width;
-        if (measuredFull > maxLabelW) {
-          const words = r.name.split(' ');
-          if (words.length >= 2 && r.h >= 5) {
-            const splitIdx = Math.ceil(words.length / 2);
-            const l1 = words.slice(0, splitIdx).join(' ');
-            const l2 = words.slice(splitIdx).join(' ');
-            const widest = Math.max(ctx.measureText(l1).width, ctx.measureText(l2).width);
-            if (widest > maxLabelW) {
-              actualFont = Math.max(8, baseLabelFont * (maxLabelW / widest) * 0.94);
+        } else if (r.id === 'room_105') {
+          for (const sx of [13.9, 15.5, 17.1]) {
+            octx.fillRect(wx(sx), wy(1.35), 1.0 * scale, 0.58 * scale);
+            octx.strokeRect(wx(sx), wy(1.35), 1.0 * scale, 0.58 * scale);
+            if (scale >= 14) {
+              octx.fillStyle = 'rgba(52, 211, 153, 0.7)';
+              octx.fillRect(wx(sx + 0.18), wy(1.56), 0.15 * scale, 0.15 * scale);
+              octx.fillStyle = 'rgba(148, 163, 184, 0.045)';
             }
-            lines = [l1, l2];
-          } else {
-            actualFont = Math.max(8, baseLabelFont * (maxLabelW / measuredFull) * 0.94);
+          }
+        } else if (r.id === 'room_103') {
+          for (const [tx, ty] of [
+            [2.7, 19.0],
+            [2.7, 22.0],
+            [8.4, 22.1],
+          ]) {
+            octx.beginPath();
+            octx.arc(wx(tx), wy(ty), 0.66 * scale, 0, Math.PI * 2);
+            octx.fill();
+            octx.stroke();
+          }
+        } else if (r.id === 'room_104') {
+          octx.fillRect(wx(28.5), wy(18.2), 1.5 * scale, 4.0 * scale);
+          octx.strokeRect(wx(28.5), wy(18.2), 1.5 * scale, 4.0 * scale);
+          octx.beginPath();
+          octx.arc(wx(23.3), wy(22.1), 0.62 * scale, 0, Math.PI * 2);
+          octx.fill();
+          octx.stroke();
+        } else if (isAtrium) {
+          octx.strokeStyle = 'rgba(148, 163, 184, 0.16)';
+          octx.beginPath();
+          octx.arc(wx(16.0), wy(12.5), 2.15 * scale, 0, Math.PI * 2);
+          octx.stroke();
+          octx.beginPath();
+          octx.arc(wx(16.0), wy(12.5), 1.35 * scale, 0, Math.PI * 2);
+          octx.stroke();
+
+          for (const [colX, colY] of [
+            [13.45, 10.45],
+            [18.25, 10.45],
+            [13.45, 14.25],
+            [18.25, 14.25],
+          ]) {
+            octx.fillStyle = 'rgba(148, 163, 184, 0.32)';
+            octx.fillRect(wx(colX), wy(colY), 0.3 * scale, 0.3 * scale);
           }
         }
 
-        if (showIconBadge && accent) {
-          const badgeX = rx + labelPadX;
-          const badgeY = ry + labelPadY - actualFont * 0.92;
-          ctx.fillStyle = accent.badgeBg;
-          ctx.beginPath();
-          ctx.roundRect(badgeX, badgeY, badgeSize, badgeSize, 5);
-          ctx.fill();
-          ctx.strokeStyle = `${accent.stroke}55`;
-          ctx.lineWidth = 1;
-          ctx.stroke();
-          drawRoomMicroIcon(r.id, badgeX + badgeSize / 2, badgeY + badgeSize / 2, accent.stroke);
+        if (isRoomTarget) {
+          octx.strokeStyle = 'rgba(56, 189, 248, 0.65)';
+          octx.lineWidth = 1.8;
+          octx.strokeRect(rx + 1, ry + 1, rw - 2, rh - 2);
         }
 
-        ctx.fillStyle = isRoomTarget ? '#7DD3FC' : '#E2E8F0';
-        ctx.font = `600 ${actualFont}px "Plus Jakarta Sans", system-ui, sans-serif`;
+        const labelPadX = Math.max(7, scale * 0.42);
+        const showIconBadge = !isAtrium && scale >= 15 && rw >= 95;
+        const badgeSize = showIconBadge ? 18 : 0;
+        const badgeGap = showIconBadge ? 7 : 0;
+        const textStartX = rx + labelPadX + badgeSize + badgeGap;
+        const maxLabelW = Math.max(24, rw - labelPadX * 2 - badgeSize - badgeGap);
+        const baseLabelFont = Math.max(9.5, Math.min(13, scale * 0.41));
+        const codeFontSize = Math.max(8, Math.min(10, scale * 0.3));
 
-        let maxLineW = 0;
-        lines.forEach((line, idx) => {
-          const ly = ry + labelPadY + idx * (actualFont + 2);
-          ctx.save();
-          ctx.translate(textStartX, ly);
-          ctx.scale(1, labelYScale);
-          ctx.fillText(line, 0, 0, maxLabelW);
-          ctx.restore();
-          maxLineW = Math.max(maxLineW, Math.min(maxLabelW, ctx.measureText(line).width));
-        });
-
-        const code = ROOM_CODES[r.id];
-        let totalTextH = lines.length * (actualFont + 2);
-        if (code && scale >= 13) {
-          ctx.fillStyle = '#64748B';
-          ctx.font = `500 ${codeFontSize}px "JetBrains Mono", monospace`;
-          const codeY = ry + labelPadY + lines.length * (actualFont + 2) + 2;
-          ctx.save();
-          ctx.translate(textStartX, codeY);
-          ctx.scale(1, labelYScale);
-          ctx.fillText(`RM ${code}`, 0, 0, maxLabelW);
-          ctx.restore();
-          totalTextH += codeFontSize + 5;
-        }
-
-        occupiedLabels.push({
-          x: rx + labelPadX - 2,
-          y: ry + labelPadY - actualFont - 1,
-          w: badgeSize + badgeGap + maxLineW + 6,
-          h: Math.max(badgeSize, totalTextH) + 4,
-        });
-      }
-    });
-
-    // 4. Open Doorway Floor Thresholds, Jamb Caps & CAD Door-Swing Arcs
-    FLOOR_ROOMS.forEach((r) => {
-      const rx = wx(r.x);
-      const ry = wy(r.y);
-      const rw = r.w * scale;
-      const rh = r.h * scale;
-      const isAtrium = r.id === 'corr_center';
-
-      r.doors.forEach((d) => {
-        const doorLenPx = (d.end - d.start) * scale;
-        const swingR = Math.min(doorLenPx * 0.56, scale * 1.18);
-
-        // Doorway threshold floor strip matching corridor terrazzo
-        ctx.strokeStyle = '#182235';
-        ctx.lineWidth = Math.max(5, scale * 0.25);
-        ctx.beginPath();
-        if (d.side === 'top') {
-          ctx.moveTo(wx(r.x + d.start), ry);
-          ctx.lineTo(wx(r.x + d.end), ry);
-        } else if (d.side === 'bottom') {
-          ctx.moveTo(wx(r.x + d.start), ry + rh);
-          ctx.lineTo(wx(r.x + d.end), ry + rh);
-        } else if (d.side === 'left') {
-          ctx.moveTo(rx, wy(r.y + d.start));
-          ctx.lineTo(rx, wy(r.y + d.end));
+        if (isAtrium) {
+          const atriumFont = Math.max(8, Math.min(10, scale * 0.31));
+          octx.font = `700 ${atriumFont}px "JetBrains Mono", monospace`;
+          const atriumTitle = 'CENTRAL ATRIUM';
+          const tw = octx.measureText(atriumTitle).width;
+          const tx = rx + rw / 2;
+          const ty = ry + Math.max(13, scale * 0.54);
+          octx.fillStyle = 'rgba(148, 163, 184, 0.78)';
+          octx.textAlign = 'center';
+          octx.save();
+          octx.translate(tx, ty);
+          octx.scale(1, labelYScale);
+          octx.fillText(atriumTitle, 0, 0, maxLabelW);
+          octx.restore();
+          octx.textAlign = 'left';
+          occupiedLabels.push({
+            x: tx - Math.min(tw, maxLabelW) / 2 - 2,
+            y: ty - atriumFont,
+            w: Math.min(tw, maxLabelW) + 4,
+            h: atriumFont + 4,
+          });
         } else {
-          ctx.moveTo(rx + rw, wy(r.y + d.start));
-          ctx.lineTo(rx + rw, wy(r.y + d.end));
-        }
-        ctx.stroke();
+          const labelPadY =
+            r.id === 'room_105'
+              ? Math.max(24, scale * 1.38)
+              : Math.max(16, scale * 0.8);
+          octx.font = `600 ${baseLabelFont}px "Plus Jakarta Sans", system-ui, sans-serif`;
 
-        // Crisp threshold guide line
-        ctx.strokeStyle = isAtrium ? 'rgba(56, 189, 248, 0.45)' : 'rgba(56, 189, 248, 0.34)';
-        ctx.lineWidth = Math.max(1.2, scale * 0.05);
-        ctx.setLineDash([4, 4]);
-        ctx.beginPath();
-        if (d.side === 'top') {
-          ctx.moveTo(wx(r.x + d.start), ry);
-          ctx.lineTo(wx(r.x + d.end), ry);
-        } else if (d.side === 'bottom') {
-          ctx.moveTo(wx(r.x + d.start), ry + rh);
-          ctx.lineTo(wx(r.x + d.end), ry + rh);
-        } else if (d.side === 'left') {
-          ctx.moveTo(rx, wy(r.y + d.start));
-          ctx.lineTo(rx, wy(r.y + d.end));
-        } else {
-          ctx.moveTo(rx + rw, wy(r.y + d.start));
-          ctx.lineTo(rx + rw, wy(r.y + d.end));
-        }
-        ctx.stroke();
-        ctx.setLineDash([]);
-
-        // Architectural CAD inward door swing arc + jamb caps
-        if (!isAtrium && scale >= 12) {
-          ctx.strokeStyle = 'rgba(148, 163, 184, 0.32)';
-          ctx.lineWidth = 1.15;
-          ctx.beginPath();
-          if (d.side === 'top') {
-            const hx = wx(r.x + d.start);
-            ctx.moveTo(hx, ry);
-            ctx.lineTo(hx, ry + swingR);
-            ctx.arc(hx, ry, swingR, Math.PI / 2, 0, true);
-          } else if (d.side === 'bottom') {
-            const hx = wx(r.x + d.start);
-            ctx.moveTo(hx, ry + rh);
-            ctx.lineTo(hx, ry + rh - swingR);
-            ctx.arc(hx, ry + rh, swingR, -Math.PI / 2, 0, false);
-          } else if (d.side === 'left') {
-            const hy = wy(r.y + d.start);
-            ctx.moveTo(rx, hy);
-            ctx.lineTo(rx + swingR, hy);
-            ctx.arc(rx, hy, swingR, 0, Math.PI / 2, false);
-          } else {
-            const hy = wy(r.y + d.start);
-            ctx.moveTo(rx + rw, hy);
-            ctx.lineTo(rx + rw - swingR, hy);
-            ctx.arc(rx + rw, hy, swingR, Math.PI, Math.PI / 2, true);
+          let lines: string[] = [r.name];
+          let actualFont = baseLabelFont;
+          const measuredFull = octx.measureText(r.name).width;
+          if (measuredFull > maxLabelW) {
+            const words = r.name.split(' ');
+            if (words.length >= 2 && r.h >= 5) {
+              const splitIdx = Math.ceil(words.length / 2);
+              const l1 = words.slice(0, splitIdx).join(' ');
+              const l2 = words.slice(splitIdx).join(' ');
+              const widest = Math.max(octx.measureText(l1).width, octx.measureText(l2).width);
+              if (widest > maxLabelW) {
+                actualFont = Math.max(8, baseLabelFont * (maxLabelW / widest) * 0.94);
+              }
+              lines = [l1, l2];
+            } else {
+              actualFont = Math.max(8, baseLabelFont * (maxLabelW / measuredFull) * 0.94);
+            }
           }
-          ctx.stroke();
 
-          ctx.fillStyle = '#94A3B8';
-          const jSize = 2.6;
-          if (d.side === 'top' || d.side === 'bottom') {
-            const jy = d.side === 'top' ? ry : ry + rh;
-            ctx.fillRect(wx(r.x + d.start) - jSize / 2, jy - jSize / 2, jSize, jSize);
-            ctx.fillRect(wx(r.x + d.end) - jSize / 2, jy - jSize / 2, jSize, jSize);
-          } else {
-            const jx = d.side === 'left' ? rx : rx + rw;
-            ctx.fillRect(jx - jSize / 2, wy(r.y + d.start) - jSize / 2, jSize, jSize);
-            ctx.fillRect(jx - jSize / 2, wy(r.y + d.end) - jSize / 2, jSize, jSize);
+          if (showIconBadge && accent) {
+            const badgeX = rx + labelPadX;
+            const badgeY = ry + labelPadY - actualFont * 0.92;
+            octx.fillStyle = accent.badgeBg;
+            octx.beginPath();
+            octx.roundRect(badgeX, badgeY, badgeSize, badgeSize, 5);
+            octx.fill();
+            octx.strokeStyle = `${accent.stroke}55`;
+            octx.lineWidth = 1;
+            octx.stroke();
+            drawRoomMicroIcon(r.id, badgeX + badgeSize / 2, badgeY + badgeSize / 2, accent.stroke);
           }
+
+          octx.fillStyle = isRoomTarget ? '#7DD3FC' : '#E2E8F0';
+          octx.font = `600 ${actualFont}px "Plus Jakarta Sans", system-ui, sans-serif`;
+
+          let maxLineW = 0;
+          lines.forEach((line, idx) => {
+            const ly = ry + labelPadY + idx * (actualFont + 2);
+            octx.save();
+            octx.translate(textStartX, ly);
+            octx.scale(1, labelYScale);
+            octx.fillText(line, 0, 0, maxLabelW);
+            octx.restore();
+            maxLineW = Math.max(maxLineW, Math.min(maxLabelW, octx.measureText(line).width));
+          });
+
+          const code = ROOM_CODES[r.id];
+          let totalTextH = lines.length * (actualFont + 2);
+          if (code && scale >= 13) {
+            octx.fillStyle = '#64748B';
+            octx.font = `500 ${codeFontSize}px "JetBrains Mono", monospace`;
+            const codeY = ry + labelPadY + lines.length * (actualFont + 2) + 2;
+            octx.save();
+            octx.translate(textStartX, codeY);
+            octx.scale(1, labelYScale);
+            octx.fillText(`RM ${code}`, 0, 0, maxLabelW);
+            octx.restore();
+            totalTextH += codeFontSize + 5;
+          }
+
+          occupiedLabels.push({
+            x: rx + labelPadX - 2,
+            y: ry + labelPadY - actualFont - 1,
+            w: badgeSize + badgeGap + maxLineW + 6,
+            h: Math.max(badgeSize, totalTextH) + 4,
+          });
         }
       });
-    });
 
-    // 5. Crisp Structural Partition Walls + Bevel Highlight
-    ctx.lineCap = 'square';
-    FLOOR_WALL_SEGMENTS.forEach((w, idx) => {
-      const isOuter = idx < 4;
-      ctx.strokeStyle = isOuter ? '#7C93B0' : '#566F91';
-      ctx.lineWidth = isOuter ? Math.max(3.6, scale * 0.19) : Math.max(2.4, scale * 0.13);
+      // 4. Open Doorway Floor Thresholds, Jamb Caps & CAD Door-Swing Arcs
+      FLOOR_ROOMS.forEach((r) => {
+        const rx = wx(r.x);
+        const ry = wy(r.y);
+        const rw = r.w * scale;
+        const rh = r.h * scale;
+        const isAtrium = r.id === 'corr_center';
+
+        r.doors.forEach((d) => {
+          const doorLenPx = (d.end - d.start) * scale;
+          const swingR = Math.min(doorLenPx * 0.56, scale * 1.18);
+
+          octx.strokeStyle = '#182235';
+          octx.lineWidth = Math.max(5, scale * 0.25);
+          octx.beginPath();
+          if (d.side === 'top') {
+            octx.moveTo(wx(r.x + d.start), ry);
+            octx.lineTo(wx(r.x + d.end), ry);
+          } else if (d.side === 'bottom') {
+            octx.moveTo(wx(r.x + d.start), ry + rh);
+            octx.lineTo(wx(r.x + d.end), ry + rh);
+          } else if (d.side === 'left') {
+            octx.moveTo(rx, wy(r.y + d.start));
+            octx.lineTo(rx, wy(r.y + d.end));
+          } else {
+            octx.moveTo(rx + rw, wy(r.y + d.start));
+            octx.lineTo(rx + rw, wy(r.y + d.end));
+          }
+          octx.stroke();
+
+          octx.strokeStyle = isAtrium ? 'rgba(56, 189, 248, 0.45)' : 'rgba(56, 189, 248, 0.34)';
+          octx.lineWidth = Math.max(1.2, scale * 0.05);
+          octx.setLineDash([4, 4]);
+          octx.beginPath();
+          if (d.side === 'top') {
+            octx.moveTo(wx(r.x + d.start), ry);
+            octx.lineTo(wx(r.x + d.end), ry);
+          } else if (d.side === 'bottom') {
+            octx.moveTo(wx(r.x + d.start), ry + rh);
+            octx.lineTo(wx(r.x + d.end), ry + rh);
+          } else if (d.side === 'left') {
+            octx.moveTo(rx, wy(r.y + d.start));
+            octx.lineTo(rx, wy(r.y + d.end));
+          } else {
+            octx.moveTo(rx + rw, wy(r.y + d.start));
+            octx.lineTo(rx + rw, wy(r.y + d.end));
+          }
+          octx.stroke();
+          octx.setLineDash([]);
+
+          if (!isAtrium && scale >= 12) {
+            octx.strokeStyle = 'rgba(148, 163, 184, 0.32)';
+            octx.lineWidth = 1.15;
+            octx.beginPath();
+            if (d.side === 'top') {
+              const hx = wx(r.x + d.start);
+              octx.moveTo(hx, ry);
+              octx.lineTo(hx, ry + swingR);
+              octx.arc(hx, ry, swingR, Math.PI / 2, 0, true);
+            } else if (d.side === 'bottom') {
+              const hx = wx(r.x + d.start);
+              octx.moveTo(hx, ry + rh);
+              octx.lineTo(hx, ry + rh - swingR);
+              octx.arc(hx, ry + rh, swingR, -Math.PI / 2, 0, false);
+            } else if (d.side === 'left') {
+              const hy = wy(r.y + d.start);
+              octx.moveTo(rx, hy);
+              octx.lineTo(rx + swingR, hy);
+              octx.arc(rx, hy, swingR, 0, Math.PI / 2, false);
+            } else {
+              const hy = wy(r.y + d.start);
+              octx.moveTo(rx + rw, hy);
+              octx.lineTo(rx + rw - swingR, hy);
+              octx.arc(rx + rw, hy, swingR, Math.PI, Math.PI / 2, true);
+            }
+            octx.stroke();
+
+            octx.fillStyle = '#94A3B8';
+            const jSize = 2.6;
+            if (d.side === 'top' || d.side === 'bottom') {
+              const jy = d.side === 'top' ? ry : ry + rh;
+              octx.fillRect(wx(r.x + d.start) - jSize / 2, jy - jSize / 2, jSize, jSize);
+              octx.fillRect(wx(r.x + d.end) - jSize / 2, jy - jSize / 2, jSize, jSize);
+            } else {
+              const jx = d.side === 'left' ? rx : rx + rw;
+              octx.fillRect(jx - jSize / 2, wy(r.y + d.start) - jSize / 2, jSize, jSize);
+              octx.fillRect(jx - jSize / 2, wy(r.y + d.end) - jSize / 2, jSize, jSize);
+            }
+          }
+        });
+      });
+
+      // 5. Crisp Structural Partition Walls + Bevel Highlight
+      octx.lineCap = 'square';
+      FLOOR_WALL_SEGMENTS.forEach((w, idx) => {
+        const isOuter = idx < 4;
+        octx.strokeStyle = isOuter ? '#7C93B0' : '#566F91';
+        octx.lineWidth = isOuter ? Math.max(3.6, scale * 0.19) : Math.max(2.4, scale * 0.13);
+        octx.beginPath();
+        octx.moveTo(wx(w.x1), wy(w.y1));
+        octx.lineTo(wx(w.x2), wy(w.y2));
+        octx.stroke();
+
+        if (scale >= 14) {
+          octx.strokeStyle = 'rgba(255, 255, 255, 0.08)';
+          octx.lineWidth = 0.8;
+          octx.beginPath();
+          octx.moveTo(wx(w.x1), wy(w.y1));
+          octx.lineTo(wx(w.x2), wy(w.y2));
+          octx.stroke();
+        }
+      });
+
+      octx.restore(); // Release building footprint clip
+
+      // Crisp outer perimeter frame shell + inner architectural bevel
+      octx.strokeStyle = '#879DBB';
+      octx.lineWidth = Math.max(3.4, scale * 0.18);
+      octx.strokeRect(bx, by, bw, bh);
+      octx.strokeStyle = 'rgba(255, 255, 255, 0.11)';
+      octx.lineWidth = 1;
+      octx.strokeRect(bx + 1.5, by + 1.5, Math.max(1, bw - 3), Math.max(1, bh - 3));
+
+      octx.restore();
+      staticCacheKeyRef.current = cacheKey;
+      staticOccupiedLabelsRef.current = occupiedLabels;
+      return { canvas: offCanvas, occupiedRoomLabels: occupiedLabels };
+    };
+
+    const drawFrame = () => {
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+
+      const { width: viewW, height: viewH } = viewportSizeRef.current;
+      if (viewW <= 0 || viewH <= 0) return;
+
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      const backingW = Math.round(viewW * dpr);
+      const backingH = Math.round(viewH * dpr);
+      if (canvas.width !== backingW || canvas.height !== backingH) {
+        canvas.width = backingW;
+        canvas.height = backingH;
+      }
+
+      const st = canvasStateRef.current;
+      const { scale, panX, panY } = cameraRef.current;
+      const wx = (mx: number) => panX + mx * scale;
+      const wy = (my: number) => panY + my * scale;
+      const labelYScale = st.is25DMode ? 1.132 : 1;
+      const pulseAnim = pulseAnimRef.current;
+
+      // Smoothly interpolate visual user position toward target pose for Apple-Maps-like gliding motion
+      const targetUser = userPoseRef.current;
+      const visUser = visualUserPoseRef.current;
+      const udx = targetUser.x - visUser.x;
+      const udy = targetUser.y - visUser.y;
+      const uDist = Math.hypot(udx, udy);
+      if (uDist > 4.0 || uDist < 0.004) {
+        visUser.x = targetUser.x;
+        visUser.y = targetUser.y;
+      } else {
+        visUser.x += udx * 0.28;
+        visUser.y += udy * 0.28;
+      }
+
+      const { canvas: staticCanvas, occupiedRoomLabels } = ensureStaticLayer(
+        viewW,
+        viewH,
+        dpr,
+        scale,
+        panX,
+        panY,
+        st.is25DMode,
+        st.targetRoomId
+      );
+
+      ctx.save();
+      ctx.clearRect(0, 0, backingW, backingH);
+      // Fast hardware-accelerated blit of static architectural floor plan (< 0.2ms)
+      ctx.drawImage(staticCanvas, 0, 0);
+      ctx.scale(dpr, dpr);
+
+      const occupiedLabels: LabelRect[] = occupiedRoomLabels.slice();
+
+      // Dynamic Atrium center BLE signal wave ring
+      ctx.strokeStyle = `rgba(56, 189, 248, ${0.24 * (1 - pulseAnim)})`;
+      ctx.lineWidth = 1.25;
       ctx.beginPath();
-      ctx.moveTo(wx(w.x1), wy(w.y1));
-      ctx.lineTo(wx(w.x2), wy(w.y2));
+      ctx.arc(wx(16.0), wy(12.5), (0.9 + pulseAnim * 1.45) * scale, 0, Math.PI * 2);
       ctx.stroke();
 
-      if (scale >= 14) {
-        ctx.strokeStyle = 'rgba(255, 255, 255, 0.08)';
-        ctx.lineWidth = 0.8;
-        ctx.beginPath();
-        ctx.moveTo(wx(w.x1), wy(w.y1));
-        ctx.lineTo(wx(w.x2), wy(w.y2));
-        ctx.stroke();
-      }
-    });
-
-    ctx.restore(); // Release building footprint clip
-
-    // Crisp outer perimeter frame shell + inner architectural bevel
-    ctx.strokeStyle = '#879DBB';
-    ctx.lineWidth = Math.max(3.4, scale * 0.18);
-    ctx.strokeRect(bx, by, bw, bh);
-    ctx.strokeStyle = 'rgba(255, 255, 255, 0.11)';
-    ctx.lineWidth = 1;
-    ctx.strokeRect(bx + 1.5, by + 1.5, Math.max(1, bw - 3), Math.max(1, bh - 3));
-
-    // 6. Luminous Next-Gen A* Wayfinding Path + Travelling Directional Chevrons
-    if (activeRoute && activeRoute.pathCoordinates.length > 1) {
-      const coords = activeRoute.pathCoordinates;
+      const activeRoute = st.activeRoute;
+      const activeTarget = st.activeTarget;
+      const isSimulating = st.isSimulating;
+      const isTelemetryOpen = st.isTelemetryOpen;
+      const hoveredMarkerId = hoveredMarkerIdRef.current;
+      if (activeRoute && activeRoute.pathCoordinates.length >= 2) {
+        const coords = activeRoute.pathCoordinates;
 
       // Layer A: Soft luminous outer cyan glow
       ctx.strokeStyle = 'rgba(56, 189, 248, 0.25)';
@@ -2464,7 +2623,7 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
       ctx.arc(tx, ty, 10 + pulseAnim * 20, 0, Math.PI * 2);
       ctx.stroke();
 
-      if (targetRoomId && !activeTarget.isPeer) {
+      if (st.targetRoomId && !activeTarget.isPeer) {
         ctx.fillStyle = '#38BDF8';
         ctx.beginPath();
         ctx.arc(tx, ty, 7, 0, Math.PI * 2);
@@ -2476,13 +2635,12 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
     }
 
     // 6.5 Subtle Hardware BLE Beacon Nodes (Always visible for spatial trilateration clarity)
-    beacons.forEach((b, idx) => {
+    st.beacons.forEach((b, idx) => {
       const bxPos = wx(b.x);
       const byPos = wy(b.y);
       const dSize = Math.max(4.5, scale * 0.17);
       const beaconPulse = (pulseAnim + idx * 0.25) % 1;
 
-      // Subtle pulsing BLE broadcast ring
       ctx.strokeStyle = `rgba(56, 189, 248, ${(isSimulating || isTelemetryOpen ? 0.48 : 0.26) * (1 - beaconPulse)})`;
       ctx.lineWidth = 1.2;
       ctx.beginPath();
@@ -2537,47 +2695,76 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
 
     // 7. 4-Layer Smart Anti-Clutter User Markers, Micro-Clustering & Collision-Aware Labels
     const pinScale = getAdaptivePinScale(scale);
-    const ux = wx(userPose.x);
-    const uy = wy(userPose.y);
-    const youAvatar = currentUser.avatarUrl
-      ? avatarImagesRef.current.get(currentUser.avatarUrl)
+    const ux = wx(visUser.x);
+    const uy = wy(visUser.y);
+    const youAvatar = st.avatarUrl
+      ? avatarImagesRef.current.get(st.avatarUrl)
       : undefined;
     const youPinR = (youAvatar instanceof HTMLImageElement ? 11.5 : 8.5) * pinScale;
-    const isYouHovered = hoveredMarkerId === '__you__' || selectedInspectId === '__you__';
+    const isYouHovered = hoveredMarkerId === '__you__' || st.selectedInspectId === '__you__';
+    const labelMode = st.labelMode;
+
+    // Smoothly interpolate peer coordinates for 60fps fluid motion when users move
+    const lerpPeer = (id: string, tx: number, ty: number) => {
+      const prev = visualPeerCoordsRef.current.get(id);
+      if (!prev || Math.hypot(tx - prev.x, ty - prev.y) > 4.0) {
+        const pt = { x: tx, y: ty };
+        visualPeerCoordsRef.current.set(id, pt);
+        return pt;
+      }
+      prev.x += (tx - prev.x) * 0.24;
+      prev.y += (ty - prev.y) * 0.24;
+      return prev;
+    };
 
     // Collect all remote live users + demo bots into unified SpatialMarkerItem list
     const peerMarkers: SpatialMarkerItem[] = [
-      ...liveUsers.map((lu) => ({
-        id: lu.id,
-        kind: 'live' as const,
-        name: lu.name,
-        subtitle: `${lu.device} · Live`,
-        x: lu.x,
-        y: lu.y,
-        screenX: wx(lu.x),
-        screenY: wy(lu.y),
-        color: lu.color,
-        avatarUrl: lu.avatarUrl,
-        isTarget: targetLiveUserId === lu.id,
-        isHovered: hoveredMarkerId === lu.id || selectedInspectId === lu.id,
-        isLive: true,
-      })),
-      ...displayedDemoBots.map((peer) => ({
-        id: peer.id,
-        kind: 'demo' as const,
-        name: peer.fullName,
-        subtitle: `${peer.department} · ${peer.role}`,
-        x: peer.x,
-        y: peer.y,
-        screenX: wx(peer.x),
-        screenY: wy(peer.y),
-        color: peer.avatarColor,
-        avatarUrl: peer.avatarUrl,
-        isTarget: targetPeerId === peer.id,
-        isHovered: hoveredMarkerId === peer.id || selectedInspectId === peer.id,
-        isLive: false,
-      })),
+      ...st.liveUsers.map((lu) => {
+        const vp = lerpPeer(lu.id, lu.x, lu.y);
+        return {
+          id: lu.id,
+          kind: 'live' as const,
+          name: lu.name,
+          subtitle: `${lu.device} · Live`,
+          x: vp.x,
+          y: vp.y,
+          screenX: wx(vp.x),
+          screenY: wy(vp.y),
+          color: lu.color,
+          avatarUrl: lu.avatarUrl,
+          isTarget: st.targetLiveUserId === lu.id,
+          isHovered: hoveredMarkerId === lu.id || st.selectedInspectId === lu.id,
+          isLive: true,
+        };
+      }),
+      ...st.displayedDemoBots.map((peer) => {
+        const vp = lerpPeer(peer.id, peer.x, peer.y);
+        return {
+          id: peer.id,
+          kind: 'demo' as const,
+          name: peer.fullName,
+          subtitle: `${peer.department} · ${peer.role}`,
+          x: vp.x,
+          y: vp.y,
+          screenX: wx(vp.x),
+          screenY: wy(vp.y),
+          color: peer.avatarColor,
+          avatarUrl: peer.avatarUrl,
+          isTarget: st.targetPeerId === peer.id,
+          isHovered: hoveredMarkerId === peer.id || st.selectedInspectId === peer.id,
+          isLive: false,
+        };
+      }),
     ];
+
+    if (visualPeerCoordsRef.current.size > peerMarkers.length + 12) {
+      const activeIds = new Set(peerMarkers.map((m) => m.id));
+      for (const k of visualPeerCoordsRef.current.keys()) {
+        if (!activeIds.has(k)) {
+          visualPeerCoordsRef.current.delete(k);
+        }
+      }
+    }
 
     const { clusters, singles } = clusterCrowdedMarkers(peerMarkers, scale);
     renderedClustersRef.current = clusters;
@@ -2785,7 +2972,7 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
 
     // 2) Current User "You" (Priority 3)
     if (labelMode !== 'minimal' || isYouHovered) {
-      const youText = presenceProfile ? `You · ${getShortPersonLabel(presenceProfile.name)}` : 'You';
+      const youText = st.presenceProfile ? `You · ${getShortPersonLabel(st.presenceProfile.name)}` : 'You';
       queueFullPillLabel(3, ux, uy, youPinR, youText, {
         bg: 'rgba(30, 58, 138, 0.96)',
         border: 'rgba(147, 197, 253, 0.92)',
@@ -2893,23 +3080,20 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
     singles.filter((m) => !m.isTarget && !m.isHovered).forEach(drawPeerPin);
     singles.filter((m) => !m.isTarget && m.isHovered).forEach(drawPeerPin);
 
-    // Draw Proximity Cluster Pills (stacked mini-avatars + "+N" / "N users" badge)
+    // Draw Proximity Cluster Pills (stacked mini-avatars + "N users" badge)
     clusterMetrics.forEach(({ cluster, visibleAvatars, avatarR, overlapStep, countText, pillW, pillH }) => {
       const hasAnyLive = cluster.members.some((m) => m.isLive);
-      const isClusterOpen = activeClusterPopover?.id === cluster.id;
+      const isClusterOpen = st.activeClusterPopover?.id === cluster.id;
       const isClusterHovered = hoveredMarkerId === cluster.id;
 
       ctx.save();
       ctx.translate(cluster.screenX, cluster.screenY);
       ctx.scale(1, labelYScale);
 
-      ctx.shadowColor = 'rgba(0, 0, 0, 0.55)';
-      ctx.shadowBlur = 12;
       ctx.fillStyle = 'rgba(17, 22, 34, 0.96)';
       ctx.beginPath();
       ctx.roundRect(-pillW / 2, -pillH / 2, pillW, pillH, pillH / 2);
       ctx.fill();
-      ctx.shadowBlur = 0;
 
       ctx.strokeStyle = isClusterOpen || isClusterHovered
         ? '#38BDF8'
@@ -2919,7 +3103,6 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
       ctx.lineWidth = isClusterOpen ? 1.8 : 1.25;
       ctx.stroke();
 
-      // Stacked mini-avatars
       const startAvatarX = -pillW / 2 + 8 + avatarR;
       for (let idx = visibleAvatars - 1; idx >= 0; idx--) {
         const mem = cluster.members[idx];
@@ -2952,13 +3135,14 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
       ctx.restore();
     });
 
-    // Draw Current User Radar Puck ("You")
+    // Draw Current User Radar Puck ("You") using instant sensor headingRef.current
     ctx.fillStyle = 'rgba(59, 130, 246, 0.1)';
     ctx.beginPath();
-    ctx.arc(ux, uy, userPose.accuracy * scale, 0, Math.PI * 2);
+    ctx.arc(ux, uy, targetUser.accuracy * scale, 0, Math.PI * 2);
     ctx.fill();
 
-    const headingRad = ((userPose.heading - 90) * Math.PI) / 180;
+    const liveHeadingDeg = headingRef.current;
+    const headingRad = ((liveHeadingDeg - 90) * Math.PI) / 180;
     const coneRadius = Math.max(40, scale * 1.75);
     const coneGrad = ctx.createRadialGradient(ux, uy, 4, ux, uy, coneRadius);
     coneGrad.addColorStop(0, 'rgba(59, 130, 246, 0.48)');
@@ -3031,11 +3215,11 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
       });
 
     // 7.7 Raw Jitter vs. 1D Kalman Trilateration Comparison Overlay (Simulation)
-    if (isSimulating && rawTrilatPose && kalmanTrilatPose) {
-      const rxRaw = wx(rawTrilatPose.x);
-      const ryRaw = wy(rawTrilatPose.y);
-      const kxEst = wx(kalmanTrilatPose.x);
-      const kyEst = wy(kalmanTrilatPose.y);
+    if (isSimulating && st.rawTrilatPose && st.kalmanTrilatPose) {
+      const rxRaw = wx(st.rawTrilatPose.x);
+      const ryRaw = wy(st.rawTrilatPose.y);
+      const kxEst = wx(st.kalmanTrilatPose.x);
+      const kyEst = wy(st.kalmanTrilatPose.y);
 
       ctx.strokeStyle = 'rgba(251, 146, 60, 0.45)';
       ctx.lineWidth = 1.25;
@@ -3099,39 +3283,32 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
       ctx.fillText('5 m', scaleX + scaleLen + 6, scaleY + 1);
     }
 
-    ctx.restore();
-  }, [
-    viewportSize,
-    camera,
-    is25DMode,
-    labelMode,
-    hoveredMarkerId,
-    selectedInspectId,
-    activeClusterPopover,
-    userPose,
-    activeRoute,
-    displayedDemoBots,
-    liveUsers,
-    presenceProfile,
-    currentUser.avatarUrl,
-    avatarLoadTick,
-    targetPeerId,
-    targetLiveUserId,
-    targetRoomId,
-    activeTarget,
-    pulseAnim,
-    isSimulating,
-    isTelemetryOpen,
-    beacons,
-    rawTrilatPose,
-    kalmanTrilatPose,
-  ]);
+      ctx.restore();
+    };
+
+    let lastFrameMs = performance.now();
+    const tick = (now: number) => {
+      if (!document.hidden) {
+        const dt = Math.min(0.05, Math.max(0.005, (now - lastFrameMs) / 1000));
+        lastFrameMs = now;
+        pulseAnimRef.current = (pulseAnimRef.current + dt * 0.92) % 1;
+        needsCanvasPaintRef.current = false;
+        drawFrame();
+      }
+      rafId = requestAnimationFrame(tick);
+    };
+
+    rafId = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(rafId);
+  }, []);
 
   // Select cluster, live user, peer, room OR set laptop coordinate from canvas click coordinates (2D & 2.5D raycast safe)
   const selectMapTargetAtClientPoint = useCallback(
     (clientX: number, clientY: number, localOffset?: { x: number; y: number }) => {
       const canvas = canvasRef.current;
       if (!canvas) return;
+      const { width: vw, height: vh } = viewportSizeRef.current;
+      const cam = cameraRef.current;
       let screenX: number;
       let screenY: number;
       if (localOffset) {
@@ -3139,11 +3316,11 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
         screenY = localOffset.y;
       } else {
         const rect = canvas.getBoundingClientRect();
-        screenX = ((clientX - rect.left) / Math.max(1, rect.width)) * viewportSize.width;
-        screenY = ((clientY - rect.top) / Math.max(1, rect.height)) * viewportSize.height;
+        screenX = ((clientX - rect.left) / Math.max(1, rect.width)) * vw;
+        screenY = ((clientY - rect.top) / Math.max(1, rect.height)) * vh;
       }
-      const meterX = (screenX - camera.panX) / camera.scale;
-      const meterY = (screenY - camera.panY) / camera.scale;
+      const meterX = (screenX - cam.panX) / cam.scale;
+      const meterY = (screenY - cam.panY) / cam.scale;
 
       if (!isSpotPickerActive) {
         // 1) Check proximity clusters first so tapping a crowded group opens the Cluster Popover
@@ -3190,7 +3367,7 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
           }
         }
 
-        if (Math.hypot(userPose.x - meterX, userPose.y - meterY) < 1.5) {
+        if (Math.hypot(userPoseRef.current.x - meterX, userPoseRef.current.y - meterY) < 1.5) {
           setSelectedInspectId((prev) => (prev === '__you__' ? null : '__you__'));
           return;
         }
@@ -3235,52 +3412,49 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
       }
     },
     [
-      camera,
-      viewportSize.width,
-      viewportSize.height,
       isSpotPickerActive,
       liveUsers,
       showDemoBots,
       peers,
-      userPose.x,
-      userPose.y,
       nodes,
       deviceType,
       isSimulating,
     ]
   );
 
-  // Mouse pan, hover inspection & click handlers
+  // Mouse pan, zero-rerender hover inspection & click handlers
   const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
     cancelCameraAnimation();
+    const cam = cameraRef.current;
     pointerStateRef.current.isDragging = true;
     pointerStateRef.current.movedPx = 0;
     pointerStateRef.current.startX = e.clientX;
     pointerStateRef.current.startY = e.clientY;
-    pointerStateRef.current.origPanX = camera.panX;
-    pointerStateRef.current.origPanY = camera.panY;
+    pointerStateRef.current.origPanX = cam.panX;
+    pointerStateRef.current.origPanY = cam.panY;
   };
 
   const handleMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
     const st = pointerStateRef.current;
+    const cam = cameraRef.current;
     if (!st.isDragging) {
       const screenX = e.nativeEvent.offsetX;
       const screenY = e.nativeEvent.offsetY;
-      const meterX = (screenX - camera.panX) / camera.scale;
-      const meterY = (screenY - camera.panY) / camera.scale;
+      const meterX = (screenX - cam.panX) / cam.scale;
+      const meterY = (screenY - cam.panY) / cam.scale;
 
       const hitCluster = renderedClustersRef.current.find(
         (c) => Math.abs(screenX - c.screenX) <= 44 && Math.abs(screenY - c.screenY) <= 22
       );
       if (hitCluster) {
-        setHoveredMarkerId((prev) => (prev === hitCluster.id ? prev : hitCluster.id));
+        hoveredMarkerIdRef.current = hitCluster.id;
         setIsCanvasHoverInteractive((prev) => (prev ? prev : true));
         return;
       }
 
       const hoverLive = liveUsers.find((u) => Math.hypot(u.x - meterX, u.y - meterY) < 1.5);
       if (hoverLive) {
-        setHoveredMarkerId((prev) => (prev === hoverLive.id ? prev : hoverLive.id));
+        hoveredMarkerIdRef.current = hoverLive.id;
         setIsCanvasHoverInteractive((prev) => (prev ? prev : true));
         return;
       }
@@ -3289,13 +3463,13 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
         ? peers.find((p) => Math.hypot(p.x - meterX, p.y - meterY) < 1.5)
         : undefined;
       if (hoverPeer) {
-        setHoveredMarkerId((prev) => (prev === hoverPeer.id ? prev : hoverPeer.id));
+        hoveredMarkerIdRef.current = hoverPeer.id;
         setIsCanvasHoverInteractive((prev) => (prev ? prev : true));
         return;
       }
 
-      if (Math.hypot(userPose.x - meterX, userPose.y - meterY) < 1.3) {
-        setHoveredMarkerId((prev) => (prev === '__you__' ? prev : '__you__'));
+      if (Math.hypot(userPoseRef.current.x - meterX, userPoseRef.current.y - meterY) < 1.3) {
+        hoveredMarkerIdRef.current = '__you__';
         setIsCanvasHoverInteractive((prev) => (prev ? prev : true));
         return;
       }
@@ -3303,7 +3477,7 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
       const hoverRoom = nodes.some(
         (n) => Math.hypot(n.x - meterX, n.y - meterY) < 2.0 && n.type === 'room'
       );
-      setHoveredMarkerId((prev) => (prev === null ? prev : null));
+      hoveredMarkerIdRef.current = null;
       setIsCanvasHoverInteractive((prev) => (prev === hoverRoom ? prev : hoverRoom));
       return;
     }
@@ -3312,15 +3486,16 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
     const dy = e.clientY - st.startY;
     st.movedPx = Math.max(st.movedPx, Math.hypot(dx, dy));
     if (!isManualCameraRef.current) return;
-    setCamera((prev) =>
+    const { width: vw, height: vh } = viewportSizeRef.current;
+    applyCamera(
       clampCameraPan(
         {
-          ...prev,
+          scale: cam.scale,
           panX: st.origPanX + dx,
           panY: st.origPanY + dy,
         },
-        viewportSize.width,
-        viewportSize.height
+        vw,
+        vh
       )
     );
   };
@@ -3348,6 +3523,7 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
   const handleTouchStart = (e: React.TouchEvent<HTMLCanvasElement>) => {
     cancelCameraAnimation();
     const st = pointerStateRef.current;
+    const cam = cameraRef.current;
     if (e.touches.length === 1) {
       const t = e.touches[0];
       st.isDragging = true;
@@ -3355,8 +3531,8 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
       st.movedPx = 0;
       st.startX = t.clientX;
       st.startY = t.clientY;
-      st.origPanX = camera.panX;
-      st.origPanY = camera.panY;
+      st.origPanX = cam.panX;
+      st.origPanY = cam.panY;
     } else if (e.touches.length === 2) {
       const [t1, t2] = [e.touches[0], e.touches[1]];
       const rect = e.currentTarget.getBoundingClientRect();
@@ -3365,54 +3541,55 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
       st.pinchDist = Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
       st.pinchMidX = (t1.clientX + t2.clientX) / 2 - rect.left;
       st.pinchMidY = (t1.clientY + t2.clientY) / 2 - rect.top;
-      st.origScale = camera.scale;
-      st.origPanX = camera.panX;
-      st.origPanY = camera.panY;
+      st.origScale = cam.scale;
+      st.origPanX = cam.panX;
+      st.origPanY = cam.panY;
     }
   };
 
   const handleTouchMove = (e: React.TouchEvent<HTMLCanvasElement>) => {
     const st = pointerStateRef.current;
+    const { width: vw, height: vh } = viewportSizeRef.current;
     if (e.touches.length === 1 && st.isDragging) {
       const t = e.touches[0];
       const dx = t.clientX - st.startX;
       const dy = t.clientY - st.startY;
       st.movedPx = Math.max(st.movedPx, Math.hypot(dx, dy));
       if (!isManualCameraRef.current) return;
-      setCamera((prev) =>
+      applyCamera(
         clampCameraPan(
           {
-            ...prev,
+            scale: cameraRef.current.scale,
             panX: st.origPanX + dx,
             panY: st.origPanY + dy,
           },
-          viewportSize.width,
-          viewportSize.height
+          vw,
+          vh
         )
       );
     } else if (e.touches.length === 2 && st.pinchDist && st.pinchDist > 0) {
       const [t1, t2] = [e.touches[0], e.touches[1]];
-      const fit = computeFitCamera(viewportSize.width, viewportSize.height);
+      const fit = computeFitCamera(vw, vh);
       const nextDist = Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
       const ratio = nextDist / st.pinchDist;
       const nextScale = Math.max(fit.scale, Math.min(72, st.origScale * ratio));
       if (nextScale <= fit.scale * 1.03) {
         isManualCameraRef.current = false;
-        setCamera(fit);
+        applyCamera(fit);
         return;
       }
       isManualCameraRef.current = true;
       const worldX = (st.pinchMidX - st.origPanX) / st.origScale;
       const worldY = (st.pinchMidY - st.origPanY) / st.origScale;
-      setCamera(
+      applyCamera(
         clampCameraPan(
           {
             scale: nextScale,
             panX: st.pinchMidX - worldX * nextScale,
             panY: st.pinchMidY - worldY * nextScale,
           },
-          viewportSize.width,
-          viewportSize.height
+          vw,
+          vh
         )
       );
     }
@@ -3865,7 +4042,7 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
               onMouseUp={handleMouseUp}
               onMouseLeave={() => {
                 pointerStateRef.current.isDragging = false;
-                setHoveredMarkerId(null);
+                hoveredMarkerIdRef.current = null;
                 setIsCanvasHoverInteractive(false);
               }}
               onWheel={handleWheel}

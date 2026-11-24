@@ -89,11 +89,11 @@ function ensureOnline(): void {
   }
 }
 
-function ensureAnonKeyConfigured(): void {
+function ensureSignUpAnonKeyConfigured(): void {
   if (!hasInsForgeAnonKey) {
     throw new AuthServiceError(
       'config-error',
-      'Email & password authentication is missing VITE_INSFORGE_ANON_KEY in your environment variables. Add VITE_INSFORGE_ANON_KEY in your deployment settings and redeploy, or continue with Google/GitHub.'
+      'New account registration requires VITE_INSFORGE_ANON_KEY (your public InsForge anon_... key) in your environment variables. Add it in your deployment settings and redeploy, or sign in with Google/GitHub.'
     );
   }
 }
@@ -262,7 +262,7 @@ function mapInsForgeError(err: unknown, fallbackMessage: string): AuthServiceErr
     ) {
       return new AuthServiceError(
         'config-error',
-        'Email & password authentication requires VITE_INSFORGE_ANON_KEY in your deployment environment variables. Add it and redeploy, or continue with Google/GitHub.'
+        'Account registration requires VITE_INSFORGE_ANON_KEY (your public InsForge anon_... key) in your deployment environment variables. Add it and redeploy, or sign in with Google/GitHub.'
       );
     }
 
@@ -352,7 +352,7 @@ export const authService = {
 
   async signUp({ fullName, email, password }: SignUpInput): Promise<SignUpResult> {
     ensureOnline();
-    ensureAnonKeyConfigured();
+    ensureSignUpAnonKeyConfigured();
 
     const cleanEmail = normalizeEmail(email);
     const cleanName = fullName.trim();
@@ -395,7 +395,6 @@ export const authService = {
 
   async verifyEmail({ email, code }: VerifyEmailInput): Promise<AuthUser> {
     ensureOnline();
-    ensureAnonKeyConfigured();
 
     const cleanEmail = normalizeEmail(email);
     const cleanCode = code.trim();
@@ -425,7 +424,6 @@ export const authService = {
 
   async resendVerificationCode(email: string): Promise<void> {
     ensureOnline();
-    ensureAnonKeyConfigured();
 
     const cleanEmail = normalizeEmail(email);
     const shouldIncludeRedirect = cachedPublicConfig.verifyEmailMethod === 'link';
@@ -446,7 +444,6 @@ export const authService = {
 
   async signIn({ email, password, rememberMe = true }: SignInInput): Promise<AuthUser> {
     ensureOnline();
-    ensureAnonKeyConfigured();
 
     const cleanEmail = normalizeEmail(email);
     const { data, error } = await insforge.auth.signInWithPassword({
@@ -500,7 +497,6 @@ export const authService = {
 
   async requestPasswordReset(email: string): Promise<void> {
     ensureOnline();
-    ensureAnonKeyConfigured();
 
     const cleanEmail = normalizeEmail(email);
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
@@ -529,7 +525,6 @@ export const authService = {
     newPassword,
   }: ConfirmPasswordResetInput): Promise<void> {
     ensureOnline();
-    ensureAnonKeyConfigured();
 
     const cleanEmail = normalizeEmail(email);
     const cleanCode = code.trim();

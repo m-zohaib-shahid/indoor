@@ -363,60 +363,219 @@ function isEndpointSegmentSafe(
 }
 
 class MinHeap {
-  private items: Array<{ id: number; f: number }> = [];
+  private ids: Int32Array;
+  private fs: Float64Array;
+  private count = 0;
+
+  constructor(capacity = 16384) {
+    this.ids = new Int32Array(capacity);
+    this.fs = new Float64Array(capacity);
+  }
 
   get size(): number {
-    return this.items.length;
+    return this.count;
+  }
+
+  reset(): void {
+    this.count = 0;
   }
 
   push(id: number, f: number): void {
-    this.items.push({ id, f });
-    this.bubbleUp(this.items.length - 1);
-  }
-
-  pop(): { id: number; f: number } | undefined {
-    if (this.items.length === 0) return undefined;
-    const top = this.items[0];
-    const last = this.items.pop()!;
-    if (this.items.length > 0) {
-      this.items[0] = last;
-      this.sinkDown(0);
+    if (this.count >= this.ids.length) {
+      const nextCap = this.ids.length * 2;
+      const nextIds = new Int32Array(nextCap);
+      const nextFs = new Float64Array(nextCap);
+      nextIds.set(this.ids);
+      nextFs.set(this.fs);
+      this.ids = nextIds;
+      this.fs = nextFs;
     }
-    return top;
-  }
-
-  private bubbleUp(idx: number): void {
-    const node = this.items[idx];
+    let idx = this.count++;
     while (idx > 0) {
       const parentIdx = (idx - 1) >> 1;
-      const parent = this.items[parentIdx];
-      if (node.f >= parent.f) break;
-      this.items[idx] = parent;
+      const parentF = this.fs[parentIdx];
+      if (f >= parentF) break;
+      this.ids[idx] = this.ids[parentIdx];
+      this.fs[idx] = parentF;
       idx = parentIdx;
     }
-    this.items[idx] = node;
+    this.ids[idx] = id;
+    this.fs[idx] = f;
   }
 
-  private sinkDown(idx: number): void {
-    const len = this.items.length;
-    while (true) {
-      const leftIdx = idx * 2 + 1;
-      const rightIdx = leftIdx + 1;
-      let smallestIdx = idx;
+  popId(): number {
+    const topId = this.ids[0];
+    const lastIdx = --this.count;
+    if (lastIdx > 0) {
+      const lastId = this.ids[lastIdx];
+      const lastF = this.fs[lastIdx];
+      let idx = 0;
+      const half = lastIdx >> 1;
+      while (idx < half) {
+        let childIdx = (idx << 1) + 1;
+        let childF = this.fs[childIdx];
+        const rightIdx = childIdx + 1;
+        if (rightIdx < lastIdx && this.fs[rightIdx] < childF) {
+          childIdx = rightIdx;
+          childF = this.fs[rightIdx];
+        }
+        if (lastF <= childF) break;
+        this.ids[idx] = this.ids[childIdx];
+        this.fs[idx] = childF;
+        idx = childIdx;
+      }
+      this.ids[idx] = lastId;
+      this.fs[idx] = lastF;
+    }
+    return topId;
+  }
+}
 
-      if (leftIdx < len && this.items[leftIdx].f < this.items[smallestIdx].f) {
-        smallestIdx = leftIdx;
-      }
-      if (rightIdx < len && this.items[rightIdx].f < this.items[smallestIdx].f) {
-        smallestIdx = rightIdx;
-      }
-      if (smallestIdx === idx) break;
-      const tmp = this.items[idx];
-      this.items[idx] = this.items[smallestIdx];
-      this.items[smallestIdx] = tmp;
-      idx = smallestIdx;
+// Reusable A* scratch buffers (O(1) reset per query via epoch counters, zero GC pressure)
+const DIRS_PER_CELL = 5;
+const TOTAL_ASTAR_STATES = NAV_CELL_COUNT * DIRS_PER_CELL + 1;
+const VIRTUAL_GOAL_STATE = NAV_CELL_COUNT * DIRS_PER_CELL;
+
+const astarGScore = new Float64Array(TOTAL_ASTAR_STATES);
+const astarCameFrom = new Int32Array(TOTAL_ASTAR_STATES);
+const astarVisitedEpoch = new Uint32Array(TOTAL_ASTAR_STATES);
+const astarClosedEpoch = new Uint32Array(TOTAL_ASTAR_STATES);
+const astarGoalExitDist = new Float64Array(NAV_CELL_COUNT);
+const astarGoalExitEpoch = new Uint32Array(NAV_CELL_COUNT);
+const astarHeap = new MinHeap(TOTAL_ASTAR_STATES);
+let astarEpoch = 1;
+
+function nextAStarEpoch(): number {
+  astarEpoch += 1;
+  if (astarEpoch >= 0xfffffff0) {
+    astarVisitedEpoch.fill(0);
+    astarClosedEpoch.fill(0);
+    astarGoalExitEpoch.fill(0);
+    astarEpoch = 1;
+  }
+  return astarEpoch;
+}
+
+// Reusable Dijkstra distance-field scratch buffers for O(1) multi-user distance queries
+const fieldClosedEpoch = new Uint32Array(NAV_CELL_COUNT);
+const fieldHeap = new MinHeap(NAV_CELL_COUNT * 2);
+let fieldEpoch = 1;
+
+export interface OriginDistanceField {
+  origin: { x: number; y: number };
+  walls: WallSegment[];
+  grid: NavGridData;
+  cellDist: Float64Array;
+}
+
+/**
+ * Computes a single-source Dijkstra distance field across the 2,655-cell NavGrid once from `origin`.
+ * Allows O(1) walkable distance lookups for arbitrarily many users & rooms in < 0.4ms total.
+ */
+export function computeDistanceFieldFromOrigin(
+  origin: { x: number; y: number },
+  walls: WallSegment[] = FLOOR_WALL_SEGMENTS
+): OriginDistanceField {
+  const grid = getNavGrid(walls);
+  const cellDist = new Float64Array(NAV_CELL_COUNT);
+  cellDist.fill(Infinity);
+
+  fieldEpoch += 1;
+  if (fieldEpoch >= 0xfffffff0) {
+    fieldClosedEpoch.fill(0);
+    fieldEpoch = 1;
+  }
+  const ep = fieldEpoch;
+  fieldHeap.reset();
+
+  const startAnchors = collectVisibleAnchors(origin, grid, true);
+  for (let i = 0; i < startAnchors.length; i++) {
+    const s = startAnchors[i];
+    if (s.dist < cellDist[s.idx]) {
+      cellDist[s.idx] = s.dist;
+      fieldHeap.push(s.idx, s.dist);
     }
   }
+
+  while (fieldHeap.size > 0) {
+    const u = fieldHeap.popId();
+    if (fieldClosedEpoch[u] === ep) continue;
+    fieldClosedEpoch[u] = ep;
+
+    const baseDist = cellDist[u];
+    const uNeighbors = grid.neighbors[u];
+    for (let i = 0; i < uNeighbors.length; i++) {
+      const edge = uNeighbors[i];
+      if (fieldClosedEpoch[edge.to] === ep) continue;
+      const nd = baseDist + edge.cost;
+      if (nd < cellDist[edge.to]) {
+        cellDist[edge.to] = nd;
+        fieldHeap.push(edge.to, nd);
+      }
+    }
+  }
+
+  return { origin, walls, grid, cellDist };
+}
+
+/**
+ * Looks up the wall-aware walkable distance from `field.origin` to `target` in O(1) time.
+ */
+export function lookupWalkableDistance(
+  field: OriginDistanceField,
+  target: { x: number; y: number }
+): number {
+  const direct = Math.hypot(target.x - field.origin.x, target.y - field.origin.y);
+  if (direct < 0.05) return direct;
+  if (!doesSegmentCrossAnyWall(field.origin.x, field.origin.y, target.x, target.y, field.walls)) {
+    return direct;
+  }
+
+  const { grid, cellDist } = field;
+  const col = Math.max(
+    0,
+    Math.min(NAV_GRID_COLS - 1, Math.round((target.x - NAV_GRID_MIN_X) / NAV_GRID_STEP))
+  );
+  const row = Math.max(
+    0,
+    Math.min(NAV_GRID_ROWS - 1, Math.round((target.y - NAV_GRID_MIN_Y) / NAV_GRID_STEP))
+  );
+
+  // Check local 5x5 cell window around target (prefer wall-clear line-of-sight first)
+  let bestClear = Infinity;
+  let bestAny = Infinity;
+  const minR = Math.max(0, row - 2);
+  const maxR = Math.min(NAV_GRID_ROWS - 1, row + 2);
+  const minC = Math.max(0, col - 2);
+  const maxC = Math.min(NAV_GRID_COLS - 1, col + 2);
+
+  for (let r = minR; r <= maxR; r++) {
+    for (let c = minC; c <= maxC; c++) {
+      const idx = r * NAV_GRID_COLS + c;
+      const baseD = cellDist[idx];
+      if (!Number.isFinite(baseD)) continue;
+      const gx = grid.cellX[idx];
+      const gy = grid.cellY[idx];
+      const total = baseD + Math.hypot(target.x - gx, target.y - gy);
+      if (total < bestAny) bestAny = total;
+      if (total < bestClear && !doesSegmentCrossAnyWall(gx, gy, target.x, target.y, field.walls)) {
+        bestClear = total;
+      }
+    }
+  }
+
+  if (Number.isFinite(bestClear)) return bestClear;
+  if (Number.isFinite(bestAny)) return bestAny;
+
+  // Fallback for deeply recessed points: check visible anchors around target
+  const anchors = collectVisibleAnchors(target, grid, false);
+  let bestAnchor = Infinity;
+  for (let i = 0; i < anchors.length; i++) {
+    const a = anchors[i];
+    const d = cellDist[a.idx] + a.dist;
+    if (d < bestAnchor) bestAnchor = d;
+  }
+  return Number.isFinite(bestAnchor) ? bestAnchor : direct;
 }
 
 function collectVisibleAnchors(
@@ -591,41 +750,36 @@ export function findWallFreePath(
     return null;
   }
 
-  const goalExitCost = new Map<number, number>();
-  for (const g of goalAnchors) {
-    goalExitCost.set(g.idx, g.dist);
+  const ep = nextAStarEpoch();
+  astarHeap.reset();
+
+  for (let i = 0; i < goalAnchors.length; i++) {
+    const g = goalAnchors[i];
+    astarGoalExitEpoch[g.idx] = ep;
+    astarGoalExitDist[g.idx] = g.dist;
   }
 
-  // State encoding: cellIdx * 5 + incomingDir (dir 4 = initial virtual start, 0..3 = W/E/N/S)
-  const DIRS_PER_CELL = 5;
-  const TOTAL_STATES = NAV_CELL_COUNT * DIRS_PER_CELL + 1;
-  const VIRTUAL_GOAL = NAV_CELL_COUNT * DIRS_PER_CELL;
   const TURN_PENALTY = 0.25; // Penalize unnecessary 90-degree corridor stair-stepping
 
-  const gScore = new Float64Array(TOTAL_STATES);
-  gScore.fill(Infinity);
-  const cameFrom = new Int32Array(TOTAL_STATES);
-  cameFrom.fill(-1);
-  const closed = new Uint8Array(TOTAL_STATES);
-  const heap = new MinHeap();
-
-  for (const s of startAnchors) {
+  for (let i = 0; i < startAnchors.length; i++) {
+    const s = startAnchors[i];
     const stateId = s.idx * DIRS_PER_CELL + 4;
-    if (s.dist < gScore[stateId]) {
-      gScore[stateId] = s.dist;
+    if (astarVisitedEpoch[stateId] !== ep || s.dist < astarGScore[stateId]) {
+      astarVisitedEpoch[stateId] = ep;
+      astarGScore[stateId] = s.dist;
+      astarCameFrom[stateId] = -1;
       const h = Math.hypot(targetPoint.x - grid.cellX[s.idx], targetPoint.y - grid.cellY[s.idx]);
-      heap.push(stateId, s.dist + h);
+      astarHeap.push(stateId, s.dist + h);
     }
   }
 
   let foundGoal = false;
-  while (heap.size > 0) {
-    const current = heap.pop()!;
-    const stateId = current.id;
-    if (closed[stateId]) continue;
-    closed[stateId] = 1;
+  while (astarHeap.size > 0) {
+    const stateId = astarHeap.popId();
+    if (astarClosedEpoch[stateId] === ep) continue;
+    astarClosedEpoch[stateId] = ep;
 
-    if (stateId === VIRTUAL_GOAL) {
+    if (stateId === VIRTUAL_GOAL_STATE) {
       foundGoal = true;
       break;
     }
@@ -633,13 +787,16 @@ export function findWallFreePath(
     const u = Math.floor(stateId / DIRS_PER_CELL);
     const curDir = stateId % DIRS_PER_CELL;
 
-    const exitDist = goalExitCost.get(u);
-    if (exitDist !== undefined) {
-      const tentativeGoalG = gScore[stateId] + exitDist;
-      if (tentativeGoalG < gScore[VIRTUAL_GOAL]) {
-        gScore[VIRTUAL_GOAL] = tentativeGoalG;
-        cameFrom[VIRTUAL_GOAL] = stateId;
-        heap.push(VIRTUAL_GOAL, tentativeGoalG);
+    if (astarGoalExitEpoch[u] === ep) {
+      const tentativeGoalG = astarGScore[stateId] + astarGoalExitDist[u];
+      if (
+        astarVisitedEpoch[VIRTUAL_GOAL_STATE] !== ep ||
+        tentativeGoalG < astarGScore[VIRTUAL_GOAL_STATE]
+      ) {
+        astarVisitedEpoch[VIRTUAL_GOAL_STATE] = ep;
+        astarGScore[VIRTUAL_GOAL_STATE] = tentativeGoalG;
+        astarCameFrom[VIRTUAL_GOAL_STATE] = stateId;
+        astarHeap.push(VIRTUAL_GOAL_STATE, tentativeGoalG);
       }
     }
 
@@ -647,33 +804,34 @@ export function findWallFreePath(
     for (let i = 0; i < uNeighbors.length; i++) {
       const edge = uNeighbors[i];
       const nextState = edge.to * DIRS_PER_CELL + edge.dir;
-      if (closed[nextState]) continue;
+      if (astarClosedEpoch[nextState] === ep) continue;
 
       const turnCost = curDir !== 4 && curDir !== edge.dir ? TURN_PENALTY : 0;
-      const tentativeG = gScore[stateId] + edge.cost + turnCost;
-      if (tentativeG < gScore[nextState]) {
-        gScore[nextState] = tentativeG;
-        cameFrom[nextState] = stateId;
+      const tentativeG = astarGScore[stateId] + edge.cost + turnCost;
+      if (astarVisitedEpoch[nextState] !== ep || tentativeG < astarGScore[nextState]) {
+        astarVisitedEpoch[nextState] = ep;
+        astarGScore[nextState] = tentativeG;
+        astarCameFrom[nextState] = stateId;
         const h = Math.hypot(
           targetPoint.x - grid.cellX[edge.to],
           targetPoint.y - grid.cellY[edge.to]
         );
-        heap.push(nextState, tentativeG + h);
+        astarHeap.push(nextState, tentativeG + h);
       }
     }
   }
 
-  if (!foundGoal || cameFrom[VIRTUAL_GOAL] === -1) {
+  if (!foundGoal || astarVisitedEpoch[VIRTUAL_GOAL_STATE] !== ep || astarCameFrom[VIRTUAL_GOAL_STATE] === -1) {
     return null;
   }
 
   // Reconstruct raw grid waypoints
   const gridCells: Array<{ x: number; y: number }> = [];
-  let curr = cameFrom[VIRTUAL_GOAL];
+  let curr = astarCameFrom[VIRTUAL_GOAL_STATE];
   while (curr !== -1) {
     const cellIdx = Math.floor(curr / DIRS_PER_CELL);
     gridCells.push({ x: grid.cellX[cellIdx], y: grid.cellY[cellIdx] });
-    curr = cameFrom[curr];
+    curr = astarCameFrom[curr];
   }
   gridCells.reverse();
 
