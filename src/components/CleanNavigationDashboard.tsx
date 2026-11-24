@@ -23,6 +23,7 @@ import {
   Laptop,
   ChevronDown,
   Edit3,
+  RefreshCw,
 } from 'lucide-react';
 import {
   BuildingPeer,
@@ -110,6 +111,139 @@ const SIMULATION_TARGETS: Array<{ kind: 'peer' | 'room'; id: string }> = [
   { kind: 'room', id: 'room_103' },
   { kind: 'room', id: 'room_105' },
 ];
+
+const BLE_OPTIONAL_SERVICES = [
+  'generic_access',
+  'device_information',
+  'battery_service',
+  'heart_rate',
+  '0000feaa-0000-1000-8000-00805f9b34fb',
+  '0000fe9a-0000-1000-8000-00805f9b34fb',
+];
+
+type BleScanMode = 'beacons' | 'prefix' | 'all';
+
+interface WebBluetoothGattCharacteristic {
+  readValue: () => Promise<DataView>;
+}
+
+interface WebBluetoothGattService {
+  getCharacteristic: (uuid: string | number) => Promise<WebBluetoothGattCharacteristic>;
+}
+
+interface WebBluetoothGattServer {
+  connected: boolean;
+  connect: () => Promise<WebBluetoothGattServer>;
+  disconnect: () => void;
+  getPrimaryService: (uuid: string | number) => Promise<WebBluetoothGattService>;
+}
+
+interface WebBluetoothDeviceLike {
+  id: string;
+  name?: string;
+  gatt?: WebBluetoothGattServer;
+  watchAdvertisements?: () => Promise<void>;
+  addEventListener?: (type: string, listener: (ev: Event) => void) => void;
+  removeEventListener?: (type: string, listener: (ev: Event) => void) => void;
+}
+
+interface WebBluetoothNavigatorLike {
+  requestDevice: (opts: {
+    acceptAllDevices?: boolean;
+    filters?: Array<{ namePrefix?: string; services?: Array<string | number> }>;
+    optionalServices?: Array<string | number>;
+  }) => Promise<WebBluetoothDeviceLike>;
+  getDevices?: () => Promise<WebBluetoothDeviceLike[]>;
+}
+
+interface PairedBleInfo {
+  id: string;
+  displayName: string;
+  rawName: string;
+  manufacturer: string | null;
+  model: string | null;
+  batteryPct: number | null;
+  rssi: number | null;
+  connected: boolean;
+  lastUpdated: string;
+}
+
+function isCrypticBleName(name: string): boolean {
+  const trimmed = name.trim();
+  if (!trimmed) return true;
+  if (/^unknown(\s+or\s+unsupported)?\s+device/i.test(trimmed)) return true;
+  if (/^([0-9a-f]{2}[:-]){5}[0-9a-f]{2}$/i.test(trimmed)) return true;
+  if (/^[0-9a-f]{8,}$/i.test(trimmed)) return true;
+  return false;
+}
+
+function formatCleanBleName(
+  rawName?: string | null,
+  meta?: { gapName?: string | null; manufacturer?: string | null; model?: string | null; id?: string }
+): string {
+  const cleanStr = (val?: string | null) =>
+    (val ?? '')
+      .replace(/[^\x20-\x7E]/g, ' ')
+      .replace(/^LE[_-\s]+/i, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+  const gap = cleanStr(meta?.gapName);
+  if (gap && !isCrypticBleName(gap)) return gap;
+
+  const raw = cleanStr(rawName);
+  if (raw && !isCrypticBleName(raw)) return raw;
+
+  const mfg = cleanStr(meta?.manufacturer);
+  const mdl = cleanStr(meta?.model);
+  if (mfg && mdl) return `${mfg} ${mdl}`;
+  if (mfg) return `${mfg} Beacon`;
+  if (mdl) return mdl;
+
+  const suffix = (meta?.id ?? '').replace(/[^a-zA-Z0-9]/g, '').slice(-4).toUpperCase();
+  return suffix ? `BLE Beacon #${suffix}` : 'BLE Beacon';
+}
+
+function computeRemainingDistanceAlongPolyline(
+  pose: { x: number; y: number },
+  coords: Array<{ x: number; y: number }>
+): number {
+  if (coords.length < 2) return 0;
+
+  let bestSegIdx = 0;
+  let bestProjDistSq = Infinity;
+  let bestT = 0;
+
+  for (let i = 0; i < coords.length - 1; i++) {
+    const ax = coords[i].x;
+    const ay = coords[i].y;
+    const bx = coords[i + 1].x;
+    const by = coords[i + 1].y;
+    const vx = bx - ax;
+    const vy = by - ay;
+    const lenSq = vx * vx + vy * vy;
+    const t = lenSq > 1e-8 ? Math.max(0, Math.min(1, ((pose.x - ax) * vx + (pose.y - ay) * vy) / lenSq)) : 0;
+    const px = ax + t * vx;
+    const py = ay + t * vy;
+    const dSq = (pose.x - px) * (pose.x - px) + (pose.y - py) * (pose.y - py);
+    if (dSq < bestProjDistSq) {
+      bestProjDistSq = dSq;
+      bestSegIdx = i;
+      bestT = t;
+    }
+  }
+
+  const segStart = coords[bestSegIdx];
+  const segEnd = coords[bestSegIdx + 1];
+  const projX = segStart.x + bestT * (segEnd.x - segStart.x);
+  const projY = segStart.y + bestT * (segEnd.y - segStart.y);
+
+  let remaining = Math.hypot(segEnd.x - projX, segEnd.y - projY);
+  for (let i = bestSegIdx + 1; i < coords.length - 1; i++) {
+    remaining += Math.hypot(coords[i + 1].x - coords[i].x, coords[i + 1].y - coords[i].y);
+  }
+  return remaining;
+}
 
 function createInitialBeacons(poseX: number, poseY: number): TelemetryBeaconSnapshot[] {
   return BEACON_ANCHORS.map((anchor) => {
@@ -337,6 +471,23 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
   const [bleState, setBleState] = useState<BleSupportState>('checking');
   const [bleDeviceName, setBleDeviceName] = useState<string | null>(null);
   const [bleSuggestionDismissed, setBleSuggestionDismissed] = useState(false);
+  const [isBleModalOpen, setIsBleModalOpen] = useState(false);
+  const [bleScanMode, setBleScanMode] = useState<BleScanMode>('beacons');
+  const [bleNamePrefix, setBleNamePrefix] = useState('');
+  const [bleBusy, setBleBusy] = useState(false);
+  const [bleStatusNote, setBleStatusNote] = useState<string | null>(null);
+  const [blePairedDevice, setBlePairedDevice] = useState<PairedBleInfo | null>(null);
+  const [bleKnownDevices, setBleKnownDevices] = useState<PairedBleInfo[]>([]);
+  const [bleCustomAlias, setBleCustomAlias] = useState('');
+  const bleDeviceRef = useRef<WebBluetoothDeviceLike | null>(null);
+  const bleAdvCleanupRef = useRef<(() => void) | null>(null);
+  const motionSensorsActiveRef = useRef<boolean>(false);
+  const [lockedRoute, setLockedRoute] = useState<{
+    targetId: string;
+    pathCoordinates: { x: number; y: number }[];
+    totalDistance: number;
+    pathNodeIds: string[];
+  } | null>(null);
 
   const [beacons, setBeacons] = useState<TelemetryBeaconSnapshot[]>(() =>
     createInitialBeacons(16.0, 12.5)
@@ -487,34 +638,53 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
     return () => observer.disconnect();
   }, [computeFitCamera]);
 
-  // Detect Web Bluetooth availability for evaluator auto-suggestion & hardware BLE support
+  // Detect Web Bluetooth availability & previously paired devices
   useEffect(() => {
     const nav =
       typeof navigator !== 'undefined'
-        ? (navigator as Navigator & {
-            bluetooth?: { requestDevice: (opts: { acceptAllDevices: boolean }) => Promise<{ name?: string }> };
-          })
+        ? (navigator as Navigator & { bluetooth?: WebBluetoothNavigatorLike })
         : null;
     if (nav && 'bluetooth' in nav && nav.bluetooth) {
       setBleState('available');
+      if (typeof nav.bluetooth.getDevices === 'function') {
+        void nav.bluetooth
+          .getDevices()
+          .then((devices) => {
+            setBleKnownDevices(
+              devices.map((d) => ({
+                id: d.id,
+                displayName: formatCleanBleName(d.name, { id: d.id }),
+                rawName: d.name || '',
+                manufacturer: null,
+                model: null,
+                batteryPct: null,
+                rssi: null,
+                connected: Boolean(d.gatt?.connected),
+                lastUpdated: 'Saved',
+              }))
+            );
+          })
+          .catch(() => {});
+      }
     } else {
       setBleState('unsupported');
     }
   }, []);
 
-  // Close mobile sheet, telemetry drawer, or online dropdown on Escape
+  // Close mobile sheet, telemetry drawer, online dropdown, or BLE modal on Escape
   useEffect(() => {
-    if (!isMobileSheetOpen && !isTelemetryOpen && !isOnlineDropdownOpen) return;
+    if (!isMobileSheetOpen && !isTelemetryOpen && !isOnlineDropdownOpen && !isBleModalOpen) return;
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         setIsMobileSheetOpen(false);
         setIsTelemetryOpen(false);
         setIsOnlineDropdownOpen(false);
+        setIsBleModalOpen(false);
       }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [isMobileSheetOpen, isTelemetryOpen, isOnlineDropdownOpen]);
+  }, [isMobileSheetOpen, isTelemetryOpen, isOnlineDropdownOpen, isBleModalOpen]);
 
   // Step Forward immediately along live headingRef direction
   const stepForward = useCallback((stepLength = 0.7) => {
@@ -594,15 +764,50 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
     return null;
   }, [targetLiveUserId, liveUsers, targetPeerId, showDemoBots, targetRoomId, peers, nodes]);
 
+  // Lock the active A* path when Motion Sensors are enabled so navigation stays on one fixed route
+  useEffect(() => {
+    motionSensorsActiveRef.current = motionSensorsActive;
+    if (!motionSensorsActive || !activeTarget) {
+      setLockedRoute((prev) => (prev ? null : prev));
+      return;
+    }
+
+    setLockedRoute((prev) => {
+      if (prev && prev.targetId === activeTarget.id) {
+        return prev;
+      }
+      const computed = runAStarBetweenCoordinates(
+        nodes,
+        edges,
+        { x: userPoseRef.current.x, y: userPoseRef.current.y },
+        activeTarget.coords
+      );
+      if (!computed) return null;
+      return {
+        targetId: activeTarget.id,
+        pathCoordinates: computed.pathCoordinates,
+        totalDistance: computed.totalDistance,
+        pathNodeIds: computed.pathNodeIds,
+      };
+    });
+  }, [motionSensorsActive, activeTarget, nodes, edges]);
+
   const activeRoute = useMemo(() => {
     if (!activeTarget) return null;
+    if (motionSensorsActive && lockedRoute && lockedRoute.targetId === activeTarget.id) {
+      return {
+        pathCoordinates: lockedRoute.pathCoordinates,
+        totalDistance: lockedRoute.totalDistance,
+        pathNodeIds: lockedRoute.pathNodeIds,
+      };
+    }
     return runAStarBetweenCoordinates(
       nodes,
       edges,
       { x: userPose.x, y: userPose.y },
       activeTarget.coords
     );
-  }, [userPose.x, userPose.y, activeTarget, nodes, edges]);
+  }, [motionSensorsActive, lockedRoute, userPose.x, userPose.y, activeTarget, nodes, edges]);
 
   const liveDirectDistance = useMemo(() => {
     if (!activeTarget) return 0;
@@ -611,11 +816,30 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
 
   const remainingDistanceMeters = useMemo(() => {
     if (!activeTarget) return 0;
+    if (
+      motionSensorsActive &&
+      lockedRoute &&
+      lockedRoute.targetId === activeTarget.id &&
+      lockedRoute.pathCoordinates.length >= 2
+    ) {
+      return computeRemainingDistanceAlongPolyline(
+        { x: userPose.x, y: userPose.y },
+        lockedRoute.pathCoordinates
+      );
+    }
     if (activeRoute && activeRoute.totalDistance > 0) {
       return activeRoute.totalDistance;
     }
     return liveDirectDistance;
-  }, [activeRoute, liveDirectDistance, activeTarget]);
+  }, [
+    activeTarget,
+    motionSensorsActive,
+    lockedRoute,
+    userPose.x,
+    userPose.y,
+    activeRoute,
+    liveDirectDistance,
+  ]);
 
   const hasArrived = Boolean(activeTarget && liveDirectDistance < 1.4);
 
@@ -688,28 +912,303 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
     });
   }, [targetPeerId, targetRoomId]);
 
-  const connectHardwareBle = useCallback(async () => {
+  const hydrateBleDeviceInfo = useCallback(async (device: WebBluetoothDeviceLike) => {
+    if (bleAdvCleanupRef.current) {
+      bleAdvCleanupRef.current();
+      bleAdvCleanupRef.current = null;
+    }
+    bleDeviceRef.current = device;
+
+    const decoder = new TextDecoder('utf-8');
+    let gapName: string | null = null;
+    let manufacturer: string | null = null;
+    let model: string | null = null;
+    let batteryPct: number | null = null;
+    let connected = Boolean(device.gatt?.connected);
+
+    if (device.gatt) {
+      try {
+        const gattServer = await Promise.race([
+          device.gatt.connect(),
+          new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), 3500)),
+        ]);
+        connected = Boolean(gattServer?.connected);
+
+        const readTextChar = async (serviceUuid: string | number, charUuid: string | number) => {
+          try {
+            const svc = await gattServer.getPrimaryService(serviceUuid);
+            const ch = await svc.getCharacteristic(charUuid);
+            const val = await ch.readValue();
+            return decoder.decode(val.buffer).replace(/\0/g, '').trim() || null;
+          } catch {
+            return null;
+          }
+        };
+
+        gapName = await readTextChar('generic_access', 0x2a00);
+        manufacturer = await readTextChar('device_information', 0x2a29);
+        model = await readTextChar('device_information', 0x2a24);
+
+        try {
+          const batSvc = await gattServer.getPrimaryService('battery_service');
+          const batCh = await batSvc.getCharacteristic(0x2a19);
+          const batVal = await batCh.readValue();
+          if (batVal.byteLength > 0) {
+            batteryPct = batVal.getUint8(0);
+          }
+        } catch {
+          // Battery service optional
+        }
+      } catch {
+        // Device may be broadcast-only (iBeacon/Eddystone) without GATT server
+      }
+    }
+
+    const displayName = formatCleanBleName(device.name, {
+      gapName,
+      manufacturer,
+      model,
+      id: device.id,
+    });
+    const nowLabel = new Date().toLocaleTimeString([], {
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    });
+
+    const info: PairedBleInfo = {
+      id: device.id,
+      displayName,
+      rawName: device.name || '',
+      manufacturer,
+      model,
+      batteryPct,
+      rssi: null,
+      connected,
+      lastUpdated: nowLabel,
+    };
+
+    setBleDeviceName(displayName);
+    setBleCustomAlias(displayName);
+    setBlePairedDevice(info);
+    setBleState('connected');
+    setIsSimulating(false);
+    setBleSuggestionDismissed(true);
+    setBleStatusNote(
+      connected ? 'GATT connected · Name verified' : 'Paired · Passive BLE beacon mode'
+    );
+
+    if (typeof device.watchAdvertisements === 'function' && device.addEventListener) {
+      const onAdv = (ev: Event) => {
+        const adv = ev as Event & { rssi?: number; name?: string };
+        const liveRssi = typeof adv.rssi === 'number' ? adv.rssi : null;
+        if (liveRssi !== null) {
+          setBlePairedDevice((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  rssi: liveRssi,
+                  lastUpdated: new Date().toLocaleTimeString([], {
+                    hour: '2-digit',
+                    minute: '2-digit',
+                    second: '2-digit',
+                  }),
+                }
+              : prev
+          );
+          setBeacons((prevBeacons) =>
+            prevBeacons.map((b, idx) => {
+              if (idx !== 0) return b;
+              const kalman = updateKalman1D(b.kalmanState, liveRssi);
+              return {
+                ...b,
+                currentRawRssi: liveRssi,
+                filteredRssi: Number(kalman.x.toFixed(1)),
+                rawDistance: Number(rssiToDistance(liveRssi, b.txPower, b.pathLossN).toFixed(2)),
+                estimatedDistance: Number(rssiToDistance(kalman.x, b.txPower, b.pathLossN).toFixed(2)),
+                kalmanState: { q: kalman.q, r: kalman.r, p: kalman.p, x: kalman.x },
+              };
+            })
+          );
+        }
+      };
+      device.addEventListener('advertisementreceived', onAdv);
+      void device.watchAdvertisements().catch(() => {});
+      bleAdvCleanupRef.current = () => {
+        device.removeEventListener?.('advertisementreceived', onAdv);
+      };
+    }
+
+    const nav = navigator as Navigator & { bluetooth?: WebBluetoothNavigatorLike };
+    if (nav.bluetooth?.getDevices) {
+      void nav.bluetooth
+        .getDevices()
+        .then((list) => {
+          setBleKnownDevices(
+            list.map((d) => ({
+              id: d.id,
+              displayName: d.id === device.id ? displayName : formatCleanBleName(d.name, { id: d.id }),
+              rawName: d.name || '',
+              manufacturer: d.id === device.id ? manufacturer : null,
+              model: d.id === device.id ? model : null,
+              batteryPct: d.id === device.id ? batteryPct : null,
+              rssi: null,
+              connected: d.id === device.id ? connected : Boolean(d.gatt?.connected),
+              lastUpdated: d.id === device.id ? nowLabel : 'Saved',
+            }))
+          );
+        })
+        .catch(() => {});
+    }
+  }, []);
+
+  const scanAndPairHardwareBle = useCallback(
+    async (modeOverride?: BleScanMode, prefixOverride?: string) => {
+      const nav =
+        typeof navigator !== 'undefined'
+          ? (navigator as Navigator & { bluetooth?: WebBluetoothNavigatorLike })
+          : null;
+      if (!nav?.bluetooth) {
+        setBleState('unsupported');
+        setBleSuggestionDismissed(false);
+        return;
+      }
+
+      const activeMode = modeOverride ?? bleScanMode;
+      const prefix = (prefixOverride ?? bleNamePrefix).trim();
+
+      setBleBusy(true);
+      setBleStatusNote('Scanning nearby Bluetooth devices...');
+      try {
+        let requestOpts: {
+          acceptAllDevices?: boolean;
+          filters?: Array<{ namePrefix?: string; services?: Array<string | number> }>;
+          optionalServices?: Array<string | number>;
+        };
+
+        if (activeMode === 'prefix' && prefix.length > 0) {
+          requestOpts = {
+            filters: [{ namePrefix: prefix }],
+            optionalServices: BLE_OPTIONAL_SERVICES,
+          };
+        } else if (activeMode === 'beacons') {
+          requestOpts = {
+            filters: [
+              { services: ['0000feaa-0000-1000-8000-00805f9b34fb'] },
+              { services: ['0000fe9a-0000-1000-8000-00805f9b34fb'] },
+              { services: ['device_information'] },
+              { services: ['battery_service'] },
+              { services: ['generic_access'] },
+              { services: ['heart_rate'] },
+              { namePrefix: 'ESP' },
+              { namePrefix: 'Beacon' },
+              { namePrefix: 'iBeacon' },
+              { namePrefix: 'Indoor' },
+              { namePrefix: 'Nordic' },
+              { namePrefix: 'nRF' },
+              { namePrefix: 'HM' },
+              { namePrefix: 'JDY' },
+            ],
+            optionalServices: BLE_OPTIONAL_SERVICES,
+          };
+        } else {
+          requestOpts = {
+            acceptAllDevices: true,
+            optionalServices: BLE_OPTIONAL_SERVICES,
+          };
+        }
+
+        const device = await nav.bluetooth.requestDevice(requestOpts);
+        await hydrateBleDeviceInfo(device);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : '';
+        if (msg.toLowerCase().includes('cancel')) {
+          setBleStatusNote('Scan cancelled. Try "All Nearby Devices" if your beacon was hidden.');
+        } else {
+          setBleState('denied');
+          setBleStatusNote('Bluetooth permission declined or unavailable.');
+          setBleSuggestionDismissed(false);
+        }
+      } finally {
+        setBleBusy(false);
+      }
+    },
+    [bleScanMode, bleNamePrefix, hydrateBleDeviceInfo]
+  );
+
+  const refreshHardwareBle = useCallback(async () => {
     const nav =
       typeof navigator !== 'undefined'
-        ? (navigator as Navigator & {
-            bluetooth?: { requestDevice: (opts: { acceptAllDevices: boolean }) => Promise<{ name?: string }> };
-          })
+        ? (navigator as Navigator & { bluetooth?: WebBluetoothNavigatorLike })
         : null;
     if (!nav?.bluetooth) {
       setBleState('unsupported');
-      setBleSuggestionDismissed(false);
       return;
     }
+
+    setBleBusy(true);
+    setBleStatusNote('Refreshing Bluetooth devices & signal...');
     try {
-      const device = await nav.bluetooth.requestDevice({ acceptAllDevices: true });
-      setBleDeviceName(device?.name || 'BLE Beacon');
-      setBleState('connected');
-      setIsSimulating(false);
-      setBleSuggestionDismissed(true);
+      if (bleDeviceRef.current) {
+        await hydrateBleDeviceInfo(bleDeviceRef.current);
+      } else if (typeof nav.bluetooth.getDevices === 'function') {
+        const saved = await nav.bluetooth.getDevices();
+        setBleKnownDevices(
+          saved.map((d) => ({
+            id: d.id,
+            displayName: formatCleanBleName(d.name, { id: d.id }),
+            rawName: d.name || '',
+            manufacturer: null,
+            model: null,
+            batteryPct: null,
+            rssi: null,
+            connected: Boolean(d.gatt?.connected),
+            lastUpdated: 'Refreshed',
+          }))
+        );
+        if (saved.length > 0) {
+          await hydrateBleDeviceInfo(saved[0]);
+        } else {
+          setIsBleModalOpen(true);
+          setBleStatusNote('No paired device yet. Select a filter and scan.');
+        }
+      } else {
+        setIsBleModalOpen(true);
+        setBleStatusNote('Select a filter and scan for BLE beacons.');
+      }
     } catch {
-      setBleState('denied');
-      setBleSuggestionDismissed(false);
+      setBleStatusNote('Could not refresh device. Try Re-scanning.');
+    } finally {
+      setBleBusy(false);
     }
+  }, [hydrateBleDeviceInfo]);
+
+  const disconnectHardwareBle = useCallback(() => {
+    if (bleAdvCleanupRef.current) {
+      bleAdvCleanupRef.current();
+      bleAdvCleanupRef.current = null;
+    }
+    try {
+      if (bleDeviceRef.current?.gatt?.connected) {
+        bleDeviceRef.current.gatt.disconnect();
+      }
+    } catch {
+      // Ignore disconnect errors
+    }
+    bleDeviceRef.current = null;
+    setBlePairedDevice(null);
+    setBleDeviceName(null);
+    setBleCustomAlias('');
+    setBleState('available');
+    setBleStatusNote('Disconnected.');
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (bleAdvCleanupRef.current) {
+        bleAdvCleanupRef.current();
+      }
+    };
   }, []);
 
   // Evaluator Live Simulation Mode loop:
@@ -741,18 +1240,20 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
       } else if (route && route.pathCoordinates.length >= 2) {
         const distToGoal = Math.hypot(target.coords.x - curPose.x, target.coords.y - curPose.y);
         if (distToGoal < 1.1) {
-          simRuntimeRef.current.dwellTicks += 1;
-          if (simRuntimeRef.current.dwellTicks >= 4) {
-            simRuntimeRef.current.dwellTicks = 0;
-            simRuntimeRef.current.routeCycleIndex =
-              (simRuntimeRef.current.routeCycleIndex + 1) % SIMULATION_TARGETS.length;
-            const nextPick = SIMULATION_TARGETS[simRuntimeRef.current.routeCycleIndex];
-            if (nextPick.kind === 'peer') {
-              setTargetPeerId(nextPick.id);
-              setTargetRoomId(null);
-            } else {
-              setTargetRoomId(nextPick.id);
-              setTargetPeerId(null);
+          if (!motionSensorsActiveRef.current) {
+            simRuntimeRef.current.dwellTicks += 1;
+            if (simRuntimeRef.current.dwellTicks >= 4) {
+              simRuntimeRef.current.dwellTicks = 0;
+              simRuntimeRef.current.routeCycleIndex =
+                (simRuntimeRef.current.routeCycleIndex + 1) % SIMULATION_TARGETS.length;
+              const nextPick = SIMULATION_TARGETS[simRuntimeRef.current.routeCycleIndex];
+              if (nextPick.kind === 'peer') {
+                setTargetPeerId(nextPick.id);
+                setTargetRoomId(null);
+              } else {
+                setTargetRoomId(nextPick.id);
+                setTargetPeerId(null);
+              }
             }
           }
         } else {
@@ -1019,7 +1520,21 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
     setSensorStatusMessage('Motion Active');
   }, [handleOrientation, handleMotion]);
 
-  const requestSensorAccess = async () => {
+  const detachMotionListeners = useCallback(() => {
+    if (sensorCleanupRef.current) {
+      sensorCleanupRef.current();
+      sensorCleanupRef.current = null;
+    }
+    if (shakeHintTimerRef.current) {
+      window.clearTimeout(shakeHintTimerRef.current);
+      shakeHintTimerRef.current = null;
+    }
+    stepDetectorRef.current.reset();
+    setMotionSensorsActive(false);
+    setSensorStatusMessage('Enable Motion');
+  }, []);
+
+  const requestSensorAccess = useCallback(async () => {
     try {
       const reqOri = (
         DeviceOrientationEvent as unknown as { requestPermission?: () => Promise<string> }
@@ -1043,7 +1558,15 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
       setMotionSensorsActive(false);
       setSensorStatusMessage('Permission Denied');
     }
-  };
+  }, [attachMotionListeners]);
+
+  const toggleMotionSensors = useCallback(async () => {
+    if (motionSensorsActive) {
+      detachMotionListeners();
+      return;
+    }
+    await requestSensorAccess();
+  }, [motionSensorsActive, detachMotionListeners, requestSensorAccess]);
 
   useEffect(() => {
     const needsExplicitPrompt =
@@ -2354,7 +2877,8 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
           <div className="flex flex-wrap items-center gap-1.5 pointer-events-auto">
             <button
               type="button"
-              onClick={requestSensorAccess}
+              onClick={toggleMotionSensors}
+              aria-pressed={motionSensorsActive}
               className={`min-h-[44px] px-3 rounded-xl text-xs font-medium border backdrop-blur-md transition-colors flex items-center gap-1.5 whitespace-nowrap focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 ${
                 motionSensorsActive
                   ? 'bg-[#111622]/92 text-emerald-300 border-emerald-500/35'
@@ -2419,13 +2943,14 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
 
             <button
               type="button"
-              onClick={requestSensorAccess}
+              onClick={toggleMotionSensors}
+              aria-pressed={motionSensorsActive}
               className={`min-h-[44px] flex items-center gap-2 px-3.5 rounded-xl text-xs font-medium border backdrop-blur-md transition-colors whitespace-nowrap focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 ${
                 motionSensorsActive
                   ? 'bg-[#111622]/90 text-emerald-300 border-emerald-500/35'
                   : 'bg-[#111622]/90 hover:bg-[#171E2E] text-slate-200 border-white/[0.1]'
               }`}
-              title="Enable anti-shake walking step detection & compass heading"
+              title="Toggle anti-shake walking step detection & compass heading (locks active path while enabled)"
             >
               <Smartphone className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
               <span>{sensorStatusMessage}</span>
@@ -2443,16 +2968,37 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
               </button>
             )}
 
-            {bleState === 'available' && (
-              <button
-                type="button"
-                onClick={connectHardwareBle}
-                className="min-h-[44px] flex items-center gap-1.5 px-3.5 rounded-xl text-xs font-medium bg-[#111622]/90 hover:bg-[#171E2E] text-slate-200 border border-white/[0.1] backdrop-blur-md transition-colors whitespace-nowrap focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
-                title="Scan physical BLE beacon hardware via Web Bluetooth"
-              >
-                <Bluetooth className="w-3.5 h-3.5 text-sky-400 shrink-0" aria-hidden="true" />
-                <span>Pair BLE</span>
-              </button>
+            {bleState !== 'unsupported' && bleState !== 'checking' && (
+              <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  onClick={() => setIsBleModalOpen(true)}
+                  className={`min-h-[44px] flex items-center gap-1.5 px-3.5 rounded-xl text-xs font-medium border backdrop-blur-md transition-colors whitespace-nowrap focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 ${
+                    bleState === 'connected'
+                      ? 'bg-[#111622]/90 text-emerald-300 border-emerald-500/35'
+                      : 'bg-[#111622]/90 hover:bg-[#171E2E] text-slate-200 border-white/[0.1]'
+                  }`}
+                  title="Pair or filter physical BLE beacon devices via Web Bluetooth"
+                >
+                  <Bluetooth className="w-3.5 h-3.5 text-sky-400 shrink-0" aria-hidden="true" />
+                  <span className="max-w-[130px] truncate">
+                    {bleState === 'connected' && bleDeviceName ? bleDeviceName : 'Pair BLE'}
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  onClick={refreshHardwareBle}
+                  disabled={bleBusy}
+                  aria-label="Refresh Bluetooth devices and signal"
+                  title="Refresh Bluetooth devices & signal"
+                  className="w-11 h-11 rounded-xl bg-[#111622]/90 hover:bg-[#171E2E] disabled:opacity-60 text-slate-200 border border-white/[0.1] backdrop-blur-md flex items-center justify-center transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
+                >
+                  <RefreshCw
+                    className={`w-3.5 h-3.5 text-sky-400 ${bleBusy ? 'animate-spin' : ''}`}
+                    aria-hidden="true"
+                  />
+                </button>
+              </div>
             )}
           </div>
 
@@ -2977,15 +3523,30 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
                     <span>{isSimulating ? 'Stop Simulation' : 'Run Simulation'}</span>
                   </button>
 
-                  {bleState === 'available' || bleState === 'denied' ? (
-                    <button
-                      type="button"
-                      onClick={connectHardwareBle}
-                      className="min-h-[44px] px-3 rounded-xl text-xs font-medium bg-[#141B2B] hover:bg-[#1B2438] text-slate-200 border border-white/[0.1] flex items-center gap-1.5"
-                    >
-                      <Bluetooth className="w-3.5 h-3.5 text-sky-400" aria-hidden="true" />
-                      <span>BLE</span>
-                    </button>
+                  {bleState !== 'unsupported' && bleState !== 'checking' ? (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => setIsBleModalOpen(true)}
+                        className="min-h-[44px] px-3 rounded-xl text-xs font-medium bg-[#141B2B] hover:bg-[#1B2438] text-slate-200 border border-white/[0.1] flex items-center gap-1.5"
+                      >
+                        <Bluetooth className="w-3.5 h-3.5 text-sky-400" aria-hidden="true" />
+                        <span>{bleState === 'connected' ? 'BLE' : 'Pair BLE'}</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={refreshHardwareBle}
+                        disabled={bleBusy}
+                        aria-label="Refresh Bluetooth devices"
+                        title="Refresh Bluetooth devices & signal"
+                        className="w-11 h-11 rounded-xl bg-[#141B2B] hover:bg-[#1B2438] disabled:opacity-60 text-slate-200 border border-white/[0.1] flex items-center justify-center shrink-0"
+                      >
+                        <RefreshCw
+                          className={`w-3.5 h-3.5 text-sky-400 ${bleBusy ? 'animate-spin' : ''}`}
+                          aria-hidden="true"
+                        />
+                      </button>
+                    </>
                   ) : null}
                 </div>
               </div>
@@ -3240,6 +3801,211 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
             </div>
 
             <div className="flex-1 min-h-0 flex flex-col pt-3">{renderDirectoryList(true)}</div>
+          </div>
+        </div>
+      )}
+
+      {/* BLE SCANNER, CLEAN NAME FILTER & REFRESH MODAL */}
+      {isBleModalOpen && (
+        <div
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setIsBleModalOpen(false);
+          }}
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/65 backdrop-blur-sm"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Bluetooth BLE Beacon Scanner"
+        >
+          <div className="w-full max-w-[420px] bg-[#111622] border border-white/[0.12] rounded-2xl shadow-2xl overflow-hidden flex flex-col">
+            <div className="px-4 py-3.5 border-b border-white/[0.08] flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2.5 min-w-0">
+                <div className="w-9 h-9 rounded-xl bg-sky-400/15 border border-sky-400/30 flex items-center justify-center shrink-0">
+                  <Bluetooth className="w-4 h-4 text-sky-400" aria-hidden="true" />
+                </div>
+                <div className="min-w-0">
+                  <h2 className="text-sm font-bold text-white truncate">Bluetooth Beacon Scanner</h2>
+                  <p className="text-[11px] text-slate-400 truncate">
+                    Filter clean device names &amp; refresh live signal
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-1 shrink-0">
+                <button
+                  type="button"
+                  onClick={refreshHardwareBle}
+                  disabled={bleBusy}
+                  aria-label="Refresh Bluetooth devices"
+                  title="Refresh paired device & signal"
+                  className="w-10 h-10 rounded-xl bg-[#0D121D] hover:bg-slate-800 disabled:opacity-60 text-sky-400 border border-white/[0.08] flex items-center justify-center transition-colors"
+                >
+                  <RefreshCw className={`w-4 h-4 ${bleBusy ? 'animate-spin' : ''}`} aria-hidden="true" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setIsBleModalOpen(false)}
+                  aria-label="Close Bluetooth scanner"
+                  className="w-10 h-10 rounded-xl text-slate-400 hover:text-white hover:bg-slate-800 flex items-center justify-center transition-colors"
+                >
+                  <X className="w-4 h-4" aria-hidden="true" />
+                </button>
+              </div>
+            </div>
+
+            <div className="p-4 space-y-3.5 max-h-[75dvh] overflow-y-auto">
+              {/* Scan Filter Mode (Eliminates Unknown/Hex Device Spam) */}
+              <div className="space-y-2">
+                <div className="text-[11px] uppercase tracking-wider text-slate-400 font-semibold">
+                  Device Filter Before Pairing
+                </div>
+                <div className="grid grid-cols-3 gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => setBleScanMode('beacons')}
+                    className={`min-h-[40px] px-2 rounded-xl text-[11px] font-semibold border transition-colors ${
+                      bleScanMode === 'beacons'
+                        ? 'bg-sky-400 text-slate-950 border-sky-300'
+                        : 'bg-[#0D121D] text-slate-300 border-white/[0.08] hover:border-white/[0.2]'
+                    }`}
+                  >
+                    Named / Beacons
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setBleScanMode('prefix')}
+                    className={`min-h-[40px] px-2 rounded-xl text-[11px] font-semibold border transition-colors ${
+                      bleScanMode === 'prefix'
+                        ? 'bg-sky-400 text-slate-950 border-sky-300'
+                        : 'bg-[#0D121D] text-slate-300 border-white/[0.08] hover:border-white/[0.2]'
+                    }`}
+                  >
+                    By Name Prefix
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setBleScanMode('all')}
+                    className={`min-h-[40px] px-2 rounded-xl text-[11px] font-semibold border transition-colors ${
+                      bleScanMode === 'all'
+                        ? 'bg-sky-400 text-slate-950 border-sky-300'
+                        : 'bg-[#0D121D] text-slate-300 border-white/[0.08] hover:border-white/[0.2]'
+                    }`}
+                  >
+                    All Nearby
+                  </button>
+                </div>
+
+                {bleScanMode === 'prefix' && (
+                  <input
+                    type="text"
+                    value={bleNamePrefix}
+                    onChange={(e) => setBleNamePrefix(e.target.value)}
+                    placeholder="e.g. ESP, Beacon, Galaxy, iPhone..."
+                    aria-label="Bluetooth device name prefix filter"
+                    className="w-full min-h-[44px] bg-[#0D121D] border border-white/[0.12] focus:border-sky-400 rounded-xl px-3 py-2 text-xs text-white placeholder:text-slate-500 focus-visible:outline-none"
+                  />
+                )}
+
+                <p className="text-[11px] text-slate-400 leading-snug">
+                  {bleScanMode === 'beacons'
+                    ? 'Hides anonymous MAC/hex packets and shows standard BLE beacons & GATT devices.'
+                    : bleScanMode === 'prefix'
+                      ? 'Only shows devices whose Bluetooth name starts with your prefix.'
+                      : 'Lists every nearby Bluetooth packet (including unnamed devices).'}
+                </p>
+
+                <button
+                  type="button"
+                  disabled={bleBusy || (bleScanMode === 'prefix' && !bleNamePrefix.trim())}
+                  onClick={() => void scanAndPairHardwareBle()}
+                  className="w-full min-h-[44px] px-4 rounded-xl bg-sky-400 hover:bg-sky-300 disabled:opacity-50 text-slate-950 text-xs font-bold flex items-center justify-center gap-2 transition-colors"
+                >
+                  <Bluetooth className="w-4 h-4" aria-hidden="true" />
+                  <span>{bleBusy ? 'Scanning...' : 'Scan & Pair Device'}</span>
+                </button>
+              </div>
+
+              {bleStatusNote && (
+                <div className="px-3 py-2 rounded-xl bg-[#0D121D] border border-white/[0.08] text-[11px] text-slate-300">
+                  {bleStatusNote}
+                </div>
+              )}
+
+              {/* Active Paired Device with Clean Resolved Metadata & Friendly Rename */}
+              {blePairedDevice && (
+                <div className="p-3.5 rounded-xl bg-[#0D121D] border border-emerald-500/35 space-y-2.5">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <div className="text-xs font-bold text-white truncate">
+                        {blePairedDevice.displayName}
+                      </div>
+                      <div className="text-[11px] text-slate-400 mt-0.5 truncate">
+                        {[
+                          blePairedDevice.manufacturer,
+                          blePairedDevice.model,
+                          blePairedDevice.batteryPct !== null ? `${blePairedDevice.batteryPct}% bat` : null,
+                          blePairedDevice.rssi !== null ? `${blePairedDevice.rssi} dBm` : null,
+                        ]
+                          .filter(Boolean)
+                          .join(' · ') || 'Active BLE Beacon'}
+                      </div>
+                    </div>
+                    <span className="text-[10px] font-mono text-emerald-400 shrink-0">
+                      {blePairedDevice.lastUpdated}
+                    </span>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="text"
+                      value={bleCustomAlias}
+                      onChange={(e) => setBleCustomAlias(e.target.value)}
+                      placeholder="Friendly beacon name..."
+                      aria-label="Friendly beacon name"
+                      className="flex-1 min-w-0 min-h-[38px] bg-[#111622] border border-white/[0.1] rounded-lg px-2.5 text-xs text-white focus-visible:outline-none focus-visible:border-sky-400"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const clean = bleCustomAlias.trim();
+                        if (!clean) return;
+                        setBleDeviceName(clean);
+                        setBlePairedDevice((prev) => (prev ? { ...prev, displayName: clean } : prev));
+                      }}
+                      className="min-h-[38px] px-3 rounded-lg bg-[#182133] hover:bg-slate-800 text-xs font-semibold text-sky-300 border border-white/[0.08]"
+                    >
+                      Save
+                    </button>
+                    <button
+                      type="button"
+                      onClick={disconnectHardwareBle}
+                      className="min-h-[38px] px-2.5 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 text-xs font-semibold text-rose-300 border border-rose-500/30"
+                    >
+                      Unpair
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Saved Devices Quick Refresh List */}
+              {bleKnownDevices.length > 0 && (
+                <div className="space-y-1.5">
+                  <div className="text-[11px] uppercase tracking-wider text-slate-400 font-semibold">
+                    Paired Browser Devices ({bleKnownDevices.length})
+                  </div>
+                  {bleKnownDevices.map((d) => (
+                    <div
+                      key={d.id}
+                      className="px-3 py-2 rounded-xl bg-[#0D121D] border border-white/[0.08] flex items-center justify-between gap-2 text-xs"
+                    >
+                      <span className="text-slate-200 font-medium truncate">{d.displayName}</span>
+                      <span className="text-[10px] font-mono text-slate-400 shrink-0">
+                        {d.connected ? 'Connected' : d.lastUpdated}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
         </div>
       )}
