@@ -8,6 +8,7 @@ export interface AuthUser {
   name: string;
   role: string;
   email: string;
+  avatarUrl?: string;
   provider: 'email' | 'google' | 'github';
   emailVerified: boolean;
   createdAt: string;
@@ -130,6 +131,27 @@ function toAuthUser(user: UserSchema): AuthUser {
       ? user.metadata.role.trim()
       : 'Member';
 
+  const profileRecord =
+    user.profile && typeof user.profile === 'object'
+      ? (user.profile as Record<string, unknown>)
+      : null;
+  const metaRecord =
+    user.metadata && typeof user.metadata === 'object'
+      ? (user.metadata as Record<string, unknown>)
+      : null;
+
+  const rawAvatarCandidates = [
+    profileRecord?.avatar_url,
+    profileRecord?.picture,
+    profileRecord?.avatarUrl,
+    metaRecord?.avatar_url,
+    metaRecord?.picture,
+    metaRecord?.avatarUrl,
+  ];
+  const avatarUrl = rawAvatarCandidates
+    .find((val): val is string => typeof val === 'string' && /^https?:\/\//i.test(val.trim()))
+    ?.trim();
+
   const providers = Array.isArray(user.providers) ? user.providers : [];
   let provider: AuthUser['provider'] = 'email';
   if (providers.includes('google')) {
@@ -143,6 +165,7 @@ function toAuthUser(user: UserSchema): AuthUser {
     name: profileName ?? fallbackName,
     role: roleMeta,
     email: user.email,
+    avatarUrl,
     provider,
     emailVerified: Boolean(user.emailVerified),
     createdAt: user.createdAt,

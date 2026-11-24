@@ -83,6 +83,7 @@ export interface LivePresenceUser {
   presenceId?: string;
   name: string;
   color: string;
+  avatarUrl?: string;
   x: number;
   y: number;
   device: PresenceDeviceType;

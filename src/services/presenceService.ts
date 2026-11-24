@@ -95,6 +95,7 @@ interface PresenceStateMessage extends SocketMessage {
   presenceId?: string;
   name?: string;
   color?: string;
+  avatarUrl?: string;
   x?: number;
   y?: number;
   device?: PresenceDeviceType;
@@ -205,7 +206,9 @@ export class LiveFloorPresenceClient {
     }
   }
 
-  updateLocalState(patch: Partial<Pick<LivePresenceUser, 'x' | 'y' | 'name' | 'color' | 'device'>>): void {
+  updateLocalState(
+    patch: Partial<Pick<LivePresenceUser, 'x' | 'y' | 'name' | 'color' | 'avatarUrl' | 'device'>>
+  ): void {
     this.localUser = {
       ...this.localUser,
       ...patch,
@@ -306,6 +309,10 @@ export class LiveFloorPresenceClient {
       authPresenceId: metaSender ?? (existing as (LivePresenceUser & { authPresenceId?: string }) | undefined)?.authPresenceId,
       name: typeof msg.name === 'string' && msg.name.trim() ? msg.name.trim() : 'Visitor',
       color: typeof msg.color === 'string' ? msg.color : '#10B981',
+      avatarUrl:
+        typeof msg.avatarUrl === 'string' && /^https?:\/\//i.test(msg.avatarUrl.trim())
+          ? msg.avatarUrl.trim()
+          : existing?.avatarUrl,
       x: msg.x,
       y: msg.y,
       device: msg.device === 'mobile' ? 'mobile' : 'laptop',

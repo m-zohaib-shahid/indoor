@@ -60,7 +60,7 @@ import {
 } from '../services/presenceService';
 
 interface CleanNavigationDashboardProps {
-  currentUser: { name: string; role: string; email: string };
+  currentUser: { name: string; role: string; email: string; avatarUrl?: string };
   onSignOut: () => void;
 }
 
@@ -272,6 +272,38 @@ function createInitialBeacons(poseX: number, poseY: number): TelemetryBeaconSnap
     };
   });
 }
+
+interface UserAvatarProps {
+  src?: string;
+  name: string;
+  className?: string;
+  style?: React.CSSProperties;
+}
+
+const UserAvatar: React.FC<UserAvatarProps> = ({ src, name, className = '', style }) => {
+  const [failedSrc, setFailedSrc] = useState<string | null>(null);
+  const validSrc = src && failedSrc !== src ? src : undefined;
+  const initial = (name.trim()[0] || 'U').toUpperCase();
+
+  if (validSrc) {
+    return (
+      <img
+        src={validSrc}
+        alt={name}
+        referrerPolicy="no-referrer"
+        onError={() => setFailedSrc(validSrc)}
+        className={`${className} object-cover`}
+        style={style}
+      />
+    );
+  }
+
+  return (
+    <div className={`${className} flex items-center justify-center font-bold`} style={style}>
+      {initial}
+    </div>
+  );
+};
 
 export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> = ({
   currentUser,
@@ -531,6 +563,33 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
     beaconsRef.current = beacons;
   }, [beacons]);
 
+  const avatarImagesRef = useRef<Map<string, HTMLImageElement | 'loading' | 'error'>>(new Map());
+  const [avatarLoadTick, setAvatarLoadTick] = useState(0);
+
+  // Preload OAuth profile avatars (Google/GitHub) with no-referrer for crisp canvas rendering
+  useEffect(() => {
+    const urls: string[] = [];
+    if (currentUser.avatarUrl) urls.push(currentUser.avatarUrl);
+    liveUsers.forEach((lu) => {
+      if (lu.avatarUrl) urls.push(lu.avatarUrl);
+    });
+
+    urls.forEach((url) => {
+      if (avatarImagesRef.current.has(url)) return;
+      avatarImagesRef.current.set(url, 'loading');
+      const img = new Image();
+      img.referrerPolicy = 'no-referrer';
+      img.onload = () => {
+        avatarImagesRef.current.set(url, img);
+        setAvatarLoadTick((tick) => tick + 1);
+      };
+      img.onerror = () => {
+        avatarImagesRef.current.set(url, 'error');
+      };
+      img.src = url;
+    });
+  }, [currentUser.avatarUrl, liveUsers]);
+
   // Connect & sync Live Multi-User Presence over InsForge Realtime channel 'live-indoor-users'
   useEffect(() => {
     if (!presenceProfile) return;
@@ -540,6 +599,7 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
         id: localPresenceTabId,
         name: presenceProfile.name,
         color: presenceProfile.color,
+        avatarUrl: currentUser.avatarUrl,
         x: userPoseRef.current.x,
         y: userPoseRef.current.y,
         device: deviceType,
@@ -562,7 +622,7 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
       }
       void client.stop();
     };
-  }, [presenceProfile, localPresenceTabId, deviceType]);
+  }, [presenceProfile, localPresenceTabId, deviceType, currentUser.avatarUrl]);
 
   // Compute camera that fits the entire Floor 1 neatly inside any viewport (portrait phone or wide desktop)
   const computeFitCamera = useCallback((w: number, h: number): MapCamera => {
@@ -2085,14 +2145,31 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
         ctx.stroke();
       }
 
-      // Crisp user pin
-      ctx.fillStyle = lu.color;
-      ctx.beginPath();
-      ctx.arc(lx, ly, 7.5, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.strokeStyle = '#FFFFFF';
-      ctx.lineWidth = 2.5;
-      ctx.stroke();
+      const luAvatar = lu.avatarUrl ? avatarImagesRef.current.get(lu.avatarUrl) : undefined;
+      if (luAvatar instanceof HTMLImageElement) {
+        const avatarR = 11.5;
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(lx, ly, avatarR, 0, Math.PI * 2);
+        ctx.clip();
+        ctx.drawImage(luAvatar, lx - avatarR, ly - avatarR, avatarR * 2, avatarR * 2);
+        ctx.restore();
+
+        ctx.strokeStyle = isTarget ? '#FFFFFF' : lu.color;
+        ctx.lineWidth = 2.5;
+        ctx.beginPath();
+        ctx.arc(lx, ly, avatarR, 0, Math.PI * 2);
+        ctx.stroke();
+      } else {
+        // Crisp user pin
+        ctx.fillStyle = lu.color;
+        ctx.beginPath();
+        ctx.arc(lx, ly, 7.5, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = '#FFFFFF';
+        ctx.lineWidth = 2.5;
+        ctx.stroke();
+      }
 
       // Name tag pill above marker
       const tagText = lu.name;
@@ -2101,7 +2178,7 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
       const pillW = tagWidth + 16;
       const pillH = 22;
       const pillX = Math.max(8, Math.min(viewW - pillW - 8, lx - pillW / 2));
-      const pillY = Math.max(8, ly - 34);
+      const pillY = Math.max(8, ly - (luAvatar instanceof HTMLImageElement ? 38 : 34));
 
       ctx.fillStyle = 'rgba(17, 22, 34, 0.95)';
       ctx.beginPath();
@@ -2210,13 +2287,39 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
     ctx.arc(ux, uy, 9 + pulseAnim * 20, 0, Math.PI * 2);
     ctx.stroke();
 
-    ctx.fillStyle = isWallBlocked ? '#F43F5E' : '#3B82F6';
-    ctx.beginPath();
-    ctx.arc(ux, uy, 8, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.strokeStyle = '#FFFFFF';
-    ctx.lineWidth = 2.5;
-    ctx.stroke();
+    const youAvatar = currentUser.avatarUrl
+      ? avatarImagesRef.current.get(currentUser.avatarUrl)
+      : undefined;
+
+    if (youAvatar instanceof HTMLImageElement) {
+      const avatarR = 12;
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(ux, uy, avatarR, 0, Math.PI * 2);
+      ctx.clip();
+      ctx.drawImage(youAvatar, ux - avatarR, uy - avatarR, avatarR * 2, avatarR * 2);
+      ctx.restore();
+
+      ctx.strokeStyle = isWallBlocked ? '#F43F5E' : '#3B82F6';
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.arc(ux, uy, avatarR, 0, Math.PI * 2);
+      ctx.stroke();
+
+      ctx.strokeStyle = '#FFFFFF';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.arc(ux, uy, avatarR + 1.5, 0, Math.PI * 2);
+      ctx.stroke();
+    } else {
+      ctx.fillStyle = isWallBlocked ? '#F43F5E' : '#3B82F6';
+      ctx.beginPath();
+      ctx.arc(ux, uy, 8, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = '#FFFFFF';
+      ctx.lineWidth = 2.5;
+      ctx.stroke();
+    }
 
     // Distinct "You" Marker Tag so current user is immediately distinguishable from peers
     const youText = presenceProfile ? `You · ${presenceProfile.name.split(' ')[0]}` : 'You';
@@ -2225,7 +2328,7 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
     const youBoxW = youTextW + 14;
     const youBoxH = 20;
     const youBoxX = Math.max(8, Math.min(viewW - youBoxW - 8, ux - youBoxW / 2));
-    const youBoxY = Math.min(viewH - youBoxH - 8, uy + 14);
+    const youBoxY = Math.min(viewH - youBoxH - 8, uy + (youAvatar instanceof HTMLImageElement ? 18 : 14));
 
     ctx.fillStyle = 'rgba(30, 58, 138, 0.94)';
     ctx.beginPath();
@@ -2264,6 +2367,8 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
     displayedDemoBots,
     liveUsers,
     presenceProfile,
+    currentUser.avatarUrl,
+    avatarLoadTick,
     targetPeerId,
     targetLiveUserId,
     targetRoomId,
@@ -2580,16 +2685,16 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
                     }`}
                   >
                     <div className="flex items-center gap-3 min-w-0">
-                      <div
-                        className="w-9 h-9 rounded-lg flex items-center justify-center font-bold text-xs shrink-0"
+                      <UserAvatar
+                        src={lu.avatarUrl}
+                        name={lu.name}
+                        className="w-9 h-9 rounded-lg text-xs shrink-0"
                         style={{
                           backgroundColor: `${lu.color}25`,
                           color: lu.color,
                           border: `1px solid ${lu.color}55`,
                         }}
-                      >
-                        {lu.name[0]?.toUpperCase() || 'U'}
-                      </div>
+                      />
                       <div className="min-w-0">
                         <div className="font-semibold text-white text-sm truncate flex items-center gap-1.5">
                           <span className="truncate">{lu.name}</span>
@@ -2766,9 +2871,11 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
         {/* User Profile & Sign Out Footer */}
         <div className="pt-4 mt-3 border-t border-white/[0.08] flex items-center justify-between gap-3">
           <div className="flex items-center gap-2.5 min-w-0">
-            <div className="w-8 h-8 rounded-lg bg-sky-400/15 border border-sky-400/30 text-sky-300 font-bold text-xs flex items-center justify-center shrink-0">
-              {(currentUser.name.trim()[0] || 'U').toUpperCase()}
-            </div>
+            <UserAvatar
+              src={currentUser.avatarUrl}
+              name={currentUser.name}
+              className="w-8 h-8 rounded-lg bg-sky-400/15 border border-sky-400/30 text-sky-300 text-xs shrink-0"
+            />
             <div className="min-w-0">
               <div className="text-xs font-semibold text-white truncate">
                 Welcome, {firstName}
@@ -3088,14 +3195,14 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
                 {/* Local User Row */}
                 <div className="p-2.5 rounded-xl bg-[#0D121D] border border-sky-400/25 flex items-center justify-between gap-2">
                   <div className="flex items-center gap-2.5 min-w-0">
-                    <div
-                      className="w-8 h-8 rounded-lg flex items-center justify-center font-bold text-xs text-white shrink-0"
+                    <UserAvatar
+                      src={currentUser.avatarUrl}
+                      name={presenceProfile?.name || firstName}
+                      className="w-8 h-8 rounded-lg text-xs text-white shrink-0 border border-white/20"
                       style={{
                         backgroundColor: presenceProfile?.color || '#3B82F6',
                       }}
-                    >
-                      {(presenceProfile?.name || firstName)[0]?.toUpperCase() || 'Y'}
-                    </div>
+                    />
                     <div className="min-w-0">
                       <div className="text-xs font-semibold text-white truncate">
                         You · {presenceProfile?.name || 'Guest'}
@@ -3153,12 +3260,12 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
                         }`}
                       >
                         <div className="flex items-center gap-2.5 min-w-0">
-                          <div
-                            className="w-8 h-8 rounded-lg flex items-center justify-center font-bold text-xs text-slate-950 shrink-0"
+                          <UserAvatar
+                            src={lu.avatarUrl}
+                            name={lu.name}
+                            className="w-8 h-8 rounded-lg text-xs text-slate-950 shrink-0 border border-white/15"
                             style={{ backgroundColor: lu.color }}
-                          >
-                            {lu.name[0]?.toUpperCase() || 'U'}
-                          </div>
+                          />
                           <div className="min-w-0">
                             <div className="text-xs font-semibold text-white truncate">{lu.name}</div>
                             <div className="text-[11px] text-slate-400 capitalize">
@@ -3233,13 +3340,20 @@ export const CleanNavigationDashboard: React.FC<CleanNavigationDashboardProps> =
               className="bg-[#111622]/96 backdrop-blur-xl border border-sky-400/35 rounded-2xl p-4 shadow-2xl space-y-3"
             >
               <div className="flex items-start justify-between gap-2">
-                <div>
-                  <h2 className="text-sm font-bold text-white">Join Floor Map</h2>
-                  <p className="text-xs text-slate-400 mt-0.5">
-                    {deviceType === 'mobile'
-                      ? 'Share your live indoor position with others on Floor 1.'
-                      : 'Appear on the map now. Click any corridor spot to set your position.'}
-                  </p>
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <UserAvatar
+                    src={currentUser.avatarUrl}
+                    name={joinNameInput || currentUser.name}
+                    className="w-9 h-9 rounded-xl bg-sky-400/15 border border-sky-400/35 text-sky-300 text-xs shrink-0"
+                  />
+                  <div className="min-w-0">
+                    <h2 className="text-sm font-bold text-white">Join Floor Map</h2>
+                    <p className="text-xs text-slate-400 mt-0.5">
+                      {deviceType === 'mobile'
+                        ? 'Share your live indoor position with others on Floor 1.'
+                        : 'Appear on the map now. Click any corridor spot to set your position.'}
+                    </p>
+                  </div>
                 </div>
                 {presenceProfile && (
                   <button
